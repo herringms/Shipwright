@@ -175,6 +175,16 @@ contracts, and add each domain to the localhost proof before a remote build is p
 - Tillya could not see herri's equipped Bunny Hood. `PlayerSnapshotMessage` carries boots, shield, tunic, item action,
   and model state but omits `Player.currentMask`. Add the worn mask to remote presentation state and verify equip,
   unequip, scene transition, and reconnect independently from durable mask ownership.
+- Tillya's client froze at the frog log in the Zora area while the host remained responsive and its TCP connection on
+  port `7777` remained established. A client dump and log are still needed before attributing this to the frog actor or
+  scene logic.
+- That session used mismatched executables. The live host loaded the 3:02 PM build with SHA-256
+  `84DFCFD38D4BA14B4B413DCC938E9E359AEFA329638500432C9FB9CB260EFD29`; Tillya's verified baseline contains the
+  7:32 PM build with SHA-256 `9FFB6E6F5D4178EEC81DC9064932E4D95747496CB85F6E0B5C4E3D8D7E218C9B`.
+  The compatibility handshake incorrectly accepted both because uncommitted builds share the same upstream commit and
+  static PoC ID. Treat the freeze and any non-obvious actor result from this session as provisional until reproduced
+  with identical builds. Generate the advertised compatibility fingerprint from protocol-relevant source inputs and
+  make the handshake reject differing fingerprints before the next remote test.
 
 ## First Architectural Proof
 

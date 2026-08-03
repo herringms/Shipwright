@@ -100,6 +100,8 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 
 - More than two players and host migration
 - Automatic reconnect UI
+- A generated compatibility fingerprint that rejects different locally built protocol/runtime revisions even when
+  they share the same upstream Git commit
 - Authenticated pairing, encryption, NAT traversal, and invite services
 - Generic synchronization for every actor, puzzle, cutscene, and boss beyond Deku Baba and Gohma
 - Carried world actors and their player attachments, including pots and Cuccos held overhead, dropped, thrown, or
