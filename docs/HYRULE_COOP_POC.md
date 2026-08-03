@@ -111,6 +111,9 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - Host-owned durable world-event flags, beginning with `EVENTCHKINF_OPENED_ZORAS_DOMAIN`, with immediate loaded-actor
   reconciliation and reconnect replay
 - Enabled-by-default remote player name tags and same-scene minimap markers using existing Shipwright rendering hooks
+- Host-committed shared recovery and ammunition pickup effects while current health and ammunition balances remain
+  participant-local
+- One-time finder notifications for unique durable pickups, without replay during snapshot or reconnect reconciliation
 - An explicit shared-progress export policy
 - MM player, enemy, quest, and Song of Time behavior adapters
 - Player-count difficulty scaling

@@ -196,6 +196,16 @@ contracts, and add each domain to the localhost proof before a remote build is p
   Preserve both peer names during the handshake, enable both features by default, and expose separate Direct Co-op
   toggles. A marker appears only in the same scene and, in dungeons, the currently displayed room; the remote marker
   must remain visually distinct from the local player's marker. Off-scene pause-map locations can be a later extension.
+- Consumable pickups need host-committed, idempotent pickup operations rather than shared resource counters. A recovery
+  heart collected by either player is consumed once and applies its recovery amount to both players' local health,
+  clamped independently. An ammunition pickup similarly applies its normal delta and eligibility rules to both local
+  ammo pools; subsequent ammunition use remains entirely local. Rupees remain local unless a separate policy is chosen.
+- Unique durable pickups already reconcile through progression snapshots, but the observing player receives no live
+  notification. Add a one-time commit notification using Shipwright's notification UI, such as `Tillya found a Gold
+  Skulltula Token`, for tokens, Pieces of Heart, capacity upgrades such as the Silver Scale, and other non-junk durable
+  items. Notifications carry a commit ID and finder name, fire exactly once on live commit, and never replay when a
+  reconnect snapshot reconstructs state. Heart Pieces and Containers should also apply their intended recovery to both
+  local health pools while max-health progression remains shared.
 
 ## First Architectural Proof
 
