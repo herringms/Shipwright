@@ -1,0 +1,36 @@
+Hyrule Co-op Proof of Concept 2 - Windows
+
+This package contains the same Shipwright executable and support files for both players. Its minimal configuration
+selects the verified OpenGL renderer; Shipwright fills in normal controller and preference defaults on first launch.
+
+Each player must place their own supported Ocarina of Time ROM beside soh.exe. On first launch, choose Yes when
+prompted to generate an O2R archive, then allow Shipwright to process the local ROM. The included
+extractor-assets.zip is the open-source extractor definition payload required for this step; Shipwright reads it
+directly and does not unpack thousands of manifest files beside the game.
+
+First launch creates or expands shipofharkinian.json, may create logs and mods folders, and generates oot.o2r from
+the player's ROM. Windows saves are stored under %LOCALAPPDATA%\HyruleCoop\Save so they survive replacement or
+movement of the runtime folder.
+
+The package intentionally does not contain a ROM, generated oot.o2r, save files, controller settings, logs, or test
+configuration. Do not add a ROM or generated O2R archive when sharing this package.
+
+Keep this extracted folder as the player's permanent Hyrule Co-op installation. On first launch, Hyrule Co-op can
+copy saves from a nearby legacy portable installation into AppData without deleting the originals. Keep this
+installation's own shipofharkinian.json.
+
+To play:
+1. Place a supported OoT ROM beside soh.exe, start soh.exe, and generate oot.o2r when prompted.
+2. Start soh.exe again if requested, then load a save.
+3. Open Enhancements > Network > Direct Co-op.
+4. The host chooses a private port and selects Host Game.
+5. The guest enters the host address and matching port, then selects Join Game.
+
+Both players must use this exact package. The handshake rejects a different Hyrule Co-op compatibility build.
+
+For later releases, do not replace this folder with another full baseline. Extract the Hyrule-Coop-Update ZIP into
+this same permanent folder and run Apply Hyrule Co-op Update.cmd. Updates replace the complete managed runtime as a
+tested set while preserving ROM/O2R files, AppData saves, mods, logs, and personal configuration.
+
+Proof 2 shares durable inventory and equipment while preserving each player's currency, ammunition, current health
+and magic, and bottle contents. The current synchronized gameplay adapters are Deku Baba and Queen Gohma.
