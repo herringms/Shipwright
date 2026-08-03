@@ -1,7 +1,3 @@
-#ifdef WIN32
-#include <vcruntime_string.h>
-#endif
-
 #include "global.h"
 #include "vt.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"

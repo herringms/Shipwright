@@ -17,6 +17,10 @@ void SohMenu::AddMenuNetwork() {
     AddMenuEntry("Network", CVAR_SETTING("Menu.NetworkSidebarSection"));
     WidgetPath path;
 
+    // Hyrule Co-op is the primary player-facing network workflow in this build.
+    path = { "Network", "Direct Co-op", SECTION_COLUMN_1 };
+    AddSidebarEntry("Network", path.sidebarName, 1);
+
     // Sail
     path = { "Network", "Sail", SECTION_COLUMN_1 };
     AddSidebarEntry("Network", path.sidebarName, 3);
@@ -43,22 +47,21 @@ void SohMenu::AddMenuNetwork() {
     AddWidget(path, "Host & Port", WIDGET_CUSTOM).CustomFunction([](WidgetInfo& info) {
         ImGui::BeginDisabled(Sail::Instance->isEnabled || CVarGetInteger(CVAR_SETTING("DisableChanges"), 0));
         ImGui::Text("%s", info.name.c_str());
+        ImGui::Text("Host");
         CVarInputString("##HostSail", CVAR_REMOTE_SAIL("Host"),
                         InputOptions()
                             .Color(THEME_COLOR)
                             .PlaceholderText("127.0.0.1")
                             .DefaultValue("127.0.0.1")
-                            .Size(ImVec2(ImGui::GetFontSize() * 15, 0))
+                            .Size(ImVec2(ImGui::GetContentRegionAvail().x, 0))
                             .LabelPosition(LabelPositions::None));
-        ImGui::SameLine();
-        ImGui::Text(":");
-        ImGui::SameLine();
+        ImGui::Text("Port");
         CVarInputInt("##PortSail", CVAR_REMOTE_SAIL("Port"),
                      InputOptions()
                          .Color(THEME_COLOR)
                          .PlaceholderText("43384")
                          .DefaultValue("43384")
-                         .Size(ImVec2(ImGui::GetFontSize() * 5, 0))
+                         .Size(ImVec2(ImGui::GetContentRegionAvail().x, 0))
                          .LabelPosition(LabelPositions::None));
         ImGui::EndDisabled();
     });
@@ -109,22 +112,21 @@ void SohMenu::AddMenuNetwork() {
     AddWidget(path, "Host & Port", WIDGET_CUSTOM).CustomFunction([](WidgetInfo& info) {
         ImGui::BeginDisabled(CrowdControl::Instance->isEnabled || CVarGetInteger(CVAR_SETTING("DisableChanges"), 0));
         ImGui::Text("%s", info.name.c_str());
+        ImGui::Text("Host");
         CVarInputString("##HostCrowdControl", CVAR_REMOTE_CROWD_CONTROL("Host"),
                         InputOptions()
                             .Color(THEME_COLOR)
                             .PlaceholderText("127.0.0.1")
                             .DefaultValue("127.0.0.1")
-                            .Size(ImVec2(ImGui::GetFontSize() * 15, 0))
+                            .Size(ImVec2(ImGui::GetContentRegionAvail().x, 0))
                             .LabelPosition(LabelPositions::None));
-        ImGui::SameLine();
-        ImGui::Text(":");
-        ImGui::SameLine();
+        ImGui::Text("Port");
         CVarInputInt("##PortCrowdControl", CVAR_REMOTE_CROWD_CONTROL("Port"),
                      InputOptions()
                          .Color(THEME_COLOR)
                          .PlaceholderText("43384")
                          .DefaultValue("43384")
-                         .Size(ImVec2(ImGui::GetFontSize() * 5, 0))
+                         .Size(ImVec2(ImGui::GetContentRegionAvail().x, 0))
                          .LabelPosition(LabelPositions::None));
         ImGui::EndDisabled();
     });

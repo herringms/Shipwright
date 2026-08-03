@@ -1,4 +1,5 @@
 #include "SaveManager.h"
+#include "Network/HyruleCoop/HyruleCoop.h"
 #include "OTRGlobals.h"
 #include "Enhancements/game-interactor/GameInteractor.h"
 #include "Enhancements/randomizer/SeedContext.h"
@@ -20,13 +21,246 @@
 #define NOGDI // avoid various windows defines that conflict with things in z64.h
 #include <spdlog/spdlog.h>
 
-#include <fstream>
-#include <filesystem>
+#include <algorithm>
 #include <array>
+#include <cctype>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <mutex>
+#include <optional>
+#include <unordered_set>
 
 extern "C" SaveContext gSaveContext;
 using namespace std::string_literals;
+
+namespace {
+
+std::optional<std::pair<std::string, std::string>> sSaveStorageNotice;
+
+std::string Lowercase(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    return value;
+}
+
+bool IsSaveFile(const std::filesystem::directory_entry& entry) {
+    std::error_code error;
+    return entry.is_regular_file(error) && !error && Lowercase(entry.path().extension().string()) == ".sav";
+}
+
+bool ContainsSaveFiles(const std::filesystem::path& directory) {
+    std::error_code error;
+    if (!std::filesystem::is_directory(directory, error) || error) {
+        return false;
+    }
+    for (std::filesystem::directory_iterator iterator(directory, std::filesystem::directory_options::skip_permission_denied,
+                                                       error), end;
+         !error && iterator != end; iterator.increment(error)) {
+        if (IsSaveFile(*iterator)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::filesystem::file_time_type LatestSaveWriteTime(const std::filesystem::path& directory) {
+    std::filesystem::file_time_type latest = std::filesystem::file_time_type::min();
+    std::error_code error;
+    for (std::filesystem::directory_iterator iterator(directory, std::filesystem::directory_options::skip_permission_denied,
+                                                       error), end;
+         !error && iterator != end; iterator.increment(error)) {
+        if (IsSaveFile(*iterator)) {
+            const auto writeTime = iterator->last_write_time(error);
+            if (!error && writeTime > latest) {
+                latest = writeTime;
+            }
+            error.clear();
+        }
+    }
+    return latest;
+}
+
+std::string ComparablePath(const std::filesystem::path& path) {
+    std::error_code error;
+    auto absolute = std::filesystem::absolute(path, error).lexically_normal().string();
+#ifdef _WIN32
+    return Lowercase(absolute);
+#else
+    return absolute;
+#endif
+}
+
+std::optional<std::filesystem::path> FindLegacySaveDirectory(const std::filesystem::path& portableSaveDirectory,
+                                                              const std::filesystem::path& appDataSaveDirectory) {
+    if (ContainsSaveFiles(portableSaveDirectory)) {
+        return portableSaveDirectory;
+    }
+
+    std::vector<std::filesystem::path> roots;
+    roots.push_back(portableSaveDirectory.parent_path().parent_path());
+    if (const char* userProfile = std::getenv("USERPROFILE"); userProfile != nullptr && userProfile[0] != '\0') {
+        roots.emplace_back(std::filesystem::path(userProfile) / "Downloads");
+    }
+#ifdef _WIN32
+    const std::filesystem::path driveRoot = portableSaveDirectory.root_path();
+    if (!driveRoot.empty()) {
+        roots.emplace_back(driveRoot / "Games");
+        roots.emplace_back(driveRoot / "Emulators");
+    }
+#endif
+
+    std::unordered_set<std::string> visited;
+    std::optional<std::filesystem::path> newest;
+    auto newestWriteTime = std::filesystem::file_time_type::min();
+    const std::string appDataKey = ComparablePath(appDataSaveDirectory);
+
+    for (const auto& root : roots) {
+        std::error_code error;
+        if (!std::filesystem::is_directory(root, error) || error || !visited.insert(ComparablePath(root)).second) {
+            continue;
+        }
+        std::filesystem::recursive_directory_iterator iterator(
+            root, std::filesystem::directory_options::skip_permission_denied, error);
+        const std::filesystem::recursive_directory_iterator end;
+        while (!error && iterator != end) {
+            if (iterator.depth() > 3) {
+                iterator.disable_recursion_pending();
+            }
+            if (iterator->is_directory(error) && !error && Lowercase(iterator->path().filename().string()) == "save") {
+                const auto candidate = iterator->path();
+                iterator.disable_recursion_pending();
+                if (ComparablePath(candidate) != appDataKey &&
+                    std::filesystem::exists(candidate.parent_path() / "soh.exe", error) && !error &&
+                    ContainsSaveFiles(candidate)) {
+                    const auto writeTime = LatestSaveWriteTime(candidate);
+                    if (!newest.has_value() || writeTime > newestWriteTime) {
+                        newest = candidate;
+                        newestWriteTime = writeTime;
+                    }
+                }
+                error.clear();
+            }
+            iterator.increment(error);
+        }
+    }
+    return newest;
+}
+
+bool CopySaveFiles(const std::filesystem::path& source, const std::filesystem::path& destination,
+                   std::string& failureReason) {
+    std::error_code error;
+    std::filesystem::create_directories(destination, error);
+    if (error) {
+        failureReason = error.message();
+        return false;
+    }
+    for (std::filesystem::directory_iterator iterator(source, std::filesystem::directory_options::skip_permission_denied,
+                                                       error), end;
+         !error && iterator != end; iterator.increment(error)) {
+        if (!IsSaveFile(*iterator)) {
+            continue;
+        }
+        const auto destinationFile = destination / iterator->path().filename();
+        if (!std::filesystem::exists(destinationFile, error)) {
+            std::filesystem::copy_file(iterator->path(), destinationFile, std::filesystem::copy_options::none, error);
+        }
+        if (error) {
+            failureReason = error.message();
+            return false;
+        }
+    }
+    return true;
+}
+
+std::filesystem::path ResolveSaveDirectory() {
+    const std::filesystem::path portableSaveDirectory =
+        std::filesystem::absolute(Ship::Context::GetPathRelativeToAppDirectory("Save")).lexically_normal();
+    if (const char* overridePath = std::getenv("HYRULE_COOP_SAVE_DIR");
+        overridePath != nullptr && overridePath[0] != '\0') {
+        const std::filesystem::path saveDirectory = std::filesystem::absolute(overridePath).lexically_normal();
+        std::filesystem::create_directories(saveDirectory);
+        return saveDirectory;
+    }
+    if (const char* portable = std::getenv("HYRULE_COOP_PORTABLE_SAVES");
+        portable != nullptr && std::string(portable) == "1") {
+        std::filesystem::create_directories(portableSaveDirectory);
+        return portableSaveDirectory;
+    }
+
+#ifdef _WIN32
+    const char* localAppData = std::getenv("LOCALAPPDATA");
+    if (localAppData == nullptr || localAppData[0] == '\0') {
+        std::filesystem::create_directories(portableSaveDirectory);
+        sSaveStorageNotice = std::make_pair(
+            "Portable saves retained",
+            "Windows did not provide a Local AppData folder, so this launch folder will continue to own its saves.\n\n" +
+                portableSaveDirectory.string());
+        return portableSaveDirectory;
+    }
+
+    const std::filesystem::path storageRoot = std::filesystem::path(localAppData) / "HyruleCoop";
+    const std::filesystem::path appDataSaveDirectory = storageRoot / "Save";
+    const std::filesystem::path markerPath = storageRoot / "save-storage-v1.txt";
+    const bool shouldNotify = !std::filesystem::exists(markerPath);
+    std::error_code error;
+    std::filesystem::create_directories(appDataSaveDirectory, error);
+    if (error) {
+        std::filesystem::create_directories(portableSaveDirectory);
+        sSaveStorageNotice = std::make_pair(
+            "Portable saves retained",
+            "Hyrule Co-op could not create its AppData save folder, so this launch folder will continue to own its "
+            "saves.\n\n" + portableSaveDirectory.string());
+        return portableSaveDirectory;
+    }
+
+    std::optional<std::filesystem::path> migratedFrom;
+    if (!ContainsSaveFiles(appDataSaveDirectory)) {
+        migratedFrom = FindLegacySaveDirectory(portableSaveDirectory, appDataSaveDirectory);
+        if (migratedFrom.has_value()) {
+            std::string failureReason;
+            if (!CopySaveFiles(migratedFrom.value(), appDataSaveDirectory, failureReason)) {
+                std::filesystem::create_directories(portableSaveDirectory);
+                sSaveStorageNotice = std::make_pair(
+                    "Portable saves retained",
+                    "Hyrule Co-op found existing saves but could not copy them to AppData (" + failureReason +
+                        "). This launch folder will continue to own its saves.\n\n" + portableSaveDirectory.string());
+                return portableSaveDirectory;
+            }
+        }
+    }
+
+    if (shouldNotify || migratedFrom.has_value()) {
+        std::filesystem::create_directories(storageRoot, error);
+        std::ofstream marker(markerPath, std::ios::trunc);
+        marker << "Hyrule Co-op shared save storage v1\n";
+        marker << "path=" << appDataSaveDirectory.string() << '\n';
+        if (migratedFrom.has_value()) {
+            marker << "migratedFrom=" << migratedFrom->string() << '\n';
+            sSaveStorageNotice = std::make_pair(
+                "Save files migrated",
+                "Existing save files were copied to Hyrule Co-op's shared AppData folder. The originals were left "
+                "in place. Future builds and updates will use:\n\n" + appDataSaveDirectory.string());
+        } else {
+            sSaveStorageNotice = std::make_pair(
+                "Shared save location enabled",
+                "This launch folder no longer owns a separate set of saves. Hyrule Co-op saves are stored in "
+                "AppData so future builds and updates reuse them:\n\n" + appDataSaveDirectory.string());
+        }
+    }
+    return appDataSaveDirectory;
+#else
+    std::filesystem::create_directories(portableSaveDirectory);
+    return portableSaveDirectory;
+#endif
+}
+
+const std::filesystem::path& GetSaveDirectory() {
+    static const std::filesystem::path saveDirectory = ResolveSaveDirectory();
+    return saveDirectory;
+}
+
+} // namespace
 
 void SaveManager::WriteSaveFile(const std::filesystem::path& savePath, const uintptr_t addr, void* dramAddr,
                                 const size_t size) {
@@ -51,13 +285,11 @@ void SaveManager::ReadSaveFile(std::filesystem::path savePath, uintptr_t addr, v
 }
 
 std::filesystem::path SaveManager::GetFileName(int fileNum) {
-    const std::filesystem::path sSavePath(Ship::Context::GetPathRelativeToAppDirectory("Save"));
-    return sSavePath / ("file" + std::to_string(fileNum + 1) + ".sav");
+    return GetSaveDirectory() / ("file" + std::to_string(fileNum + 1) + ".sav");
 }
 
 std::filesystem::path SaveManager::GetFileTempName(int fileNum) {
-    const std::filesystem::path sSavePath(Ship::Context::GetPathRelativeToAppDirectory("Save"));
-    return sSavePath / ("file" + std::to_string(fileNum + 1) + ".temp");
+    return GetSaveDirectory() / ("file" + std::to_string(fileNum + 1) + ".temp");
 }
 
 std::vector<RandomizerHint> Rando::StaticData::oldVerHintOrder{
@@ -413,14 +645,19 @@ void SaveManager::SaveRandomizer(SaveContext* saveContext, int sectionID, bool f
 void SaveManager::Init() {
     // Wait on saves that snuck through the Wait in OnExitGame
     ThreadPoolWait();
-    const std::filesystem::path sSavePath(Ship::Context::GetPathRelativeToAppDirectory("Save"));
+    const std::filesystem::path sSavePath(GetSaveDirectory());
     const std::filesystem::path sGlobalPath = sSavePath / std::string("global.sav");
     auto sOldSavePath = Ship::Context::GetPathRelativeToAppDirectory("oot_save.sav");
     auto sOldBackupSavePath = Ship::Context::GetPathRelativeToAppDirectory("oot_save.bak");
 
     // If the save directory does not exist, create it
     if (!std::filesystem::exists(sSavePath)) {
-        std::filesystem::create_directory(sSavePath);
+        std::filesystem::create_directories(sSavePath);
+    }
+
+    if (sSaveStorageNotice.has_value()) {
+        SohGui::RegisterPopup(sSaveStorageNotice->first, sSaveStorageNotice->second);
+        sSaveStorageNotice.reset();
     }
 
     // If there is a lingering unversioned save, convert it
@@ -509,8 +746,9 @@ void SaveManager::StartupCheckAndInitMeta(int fileNum) {
         // block loading outdated rando save
         if (!(major == gBuildVersionMajor && minor == gBuildVersionMinor && patch == gBuildVersionPatch)) {
             std::string newFileName =
-                Ship::Context::GetPathRelativeToAppDirectory("Save") +
-                ("/file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak");
+                (GetSaveDirectory() /
+                 ("file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak"))
+                    .string();
 #if defined(__SWITCH__) || defined(__WIIU__)
             copy_file(fileName.c_str(), newFileName.c_str());
             std::filesystem::remove(fileName);
@@ -1233,6 +1471,9 @@ void SaveManager::SaveSection(int fileNum, int sectionID, bool threaded) {
     }
     auto saveContext = new SaveContext;
     memcpy(saveContext, &gSaveContext, sizeof(gSaveContext));
+    if (HyruleCoop::Manager::Instance != nullptr && HyruleCoop::Manager::Instance->IsActive()) {
+        HyruleCoop::Manager::Instance->SanitizeSaveCopy(saveContext);
+    }
     if (threaded) {
         smThreadPool->detach_task(std::bind(&SaveManager::SaveFileThreaded, this, fileNum, saveContext, sectionID));
     } else {
@@ -1251,7 +1492,7 @@ void SaveManager::SaveGlobal() {
     globalBlock["zTargetSetting"] = gSaveContext.zTargetSetting;
     globalBlock["language"] = gSaveContext.language;
 
-    const std::filesystem::path sSavePath(Ship::Context::GetPathRelativeToAppDirectory("Save"));
+    const std::filesystem::path sSavePath(GetSaveDirectory());
     const std::filesystem::path sGlobalPath = sSavePath / std::string("global.sav");
 
     std::ofstream output(sGlobalPath);
@@ -1322,8 +1563,9 @@ void SaveManager::LoadFile(int fileNum) {
     } catch ([[maybe_unused]] const std::exception& e) {
         input.close();
         std::string newFileName =
-            Ship::Context::GetPathRelativeToAppDirectory("Save") +
-            ("/file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak");
+            (GetSaveDirectory() /
+             ("file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak"))
+                .string();
 #if defined(__SWITCH__) || defined(__WIIU__)
         copy_file(fileName.c_str(), newFileName.c_str());
         std::filesystem::remove(fileName);

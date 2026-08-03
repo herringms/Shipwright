@@ -13,7 +13,7 @@ u8* gAudioHeap;
 u8* gSystemHeap;
 
 void Heaps_Alloc(void) {
-#ifdef _MSC_VER
+#if defined(_MSC_VER) || defined(__MINGW32__)
     gAudioHeap = (u8*)_aligned_malloc(AUDIO_HEAP_SIZE, 0x10);
     gSystemHeap = (u8*)_aligned_malloc(SYSTEM_HEAP_SIZE, 0x10);
 #elif defined(_POSIX_VERSION) && (_POSIX_VERSION >= 200112L)
@@ -31,7 +31,7 @@ void Heaps_Alloc(void) {
 }
 
 void Heaps_Free(void) {
-#ifdef _MSC_VER
+#if defined(_MSC_VER) || defined(__MINGW32__)
     _aligned_free(gAudioHeap);
     _aligned_free(gSystemHeap);
 #else
