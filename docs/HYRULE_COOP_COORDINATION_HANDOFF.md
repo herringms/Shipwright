@@ -165,10 +165,11 @@ contracts, and add each domain to the localhost proof before a remote build is p
 - The next actor pass should prove pickup from either peer, source-world removal, remote hand attachment, carried
   transform updates, drop, throw, break, and cleanup after scene change or disconnect. Add this sequence to the
   two-instance localhost harness before producing another remote package.
-- Tillya also could not see a Cucco carried by herri. Full guest-side Cucco AI is not required for the first carried
-  actor proof, but the remote player must render an attached Cucco proxy while carrying it. The guest must not render
-  both an independent ground Cucco and the attached proxy for the same canonical entity; drop or release must restore
-  one authoritative world actor.
+- Tillya also could not see a Cucco carried by herri. Cuccos used for traversal should be participant-local rather than
+  one canonical shared actor, because both players may need to carry one simultaneously in areas such as Zora's Domain.
+  Each client keeps its own interactive Cucco while rendering a non-colliding visual proxy attached to the remote
+  player's hands. Releasing a Cucco removes only that player's remote proxy; it must not create another interactive
+  Cucco on the observing client.
 - A host side-slash left Deku Babas alive on the guest. The existing harness proves only its synthetic permanent-death
   path; it does not cover the vanilla pruned, temporary-death, and regrowth lifecycle. Replicate those canonical action
   phases and test vertical and horizontal cuts from both peers, including synchronized regrowth and item drops.
