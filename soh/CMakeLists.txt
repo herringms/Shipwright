@@ -242,11 +242,11 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     set_target_properties(${PROJECT_NAME} PROPERTIES
         VS_GLOBAL_KEYWORD "Win32Proj"
     )
-    if(SOH_WINDOWS_64BIT)
+    if(MSVC AND SOH_WINDOWS_64BIT)
         set_target_properties(${PROJECT_NAME} PROPERTIES
             INTERPROCEDURAL_OPTIMIZATION_RELEASE "TRUE"
         )
-    elseif("${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
+    elseif(MSVC AND "${CMAKE_VS_PLATFORM_NAME}" STREQUAL "Win32")
         set_target_properties(${PROJECT_NAME} PROPERTIES
             INTERPROCEDURAL_OPTIMIZATION_RELEASE "TRUE"
         )
@@ -595,18 +595,29 @@ endif()
 ################################################################################
 # Pre build events
 ################################################################################
-if (CMAKE_GENERATOR MATCHES "Visual Studio")
-    add_custom_command(
-    TARGET ${PROJECT_NAME}
-    POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${CMAKE_SOURCE_DIR}/soh/assets/yml ${CMAKE_BINARY_DIR}/soh/assets
-    )
-endif()
+file(GLOB_RECURSE EXTRACTOR_MANIFEST_FILES CONFIGURE_DEPENDS
+    LIST_DIRECTORIES false
+    "${CMAKE_SOURCE_DIR}/soh/assets/yml/*"
+)
+set(EXTRACTOR_ASSET_ARCHIVE "${CMAKE_BINARY_DIR}/soh/extractor-assets.zip")
+add_custom_command(
+    OUTPUT "${EXTRACTOR_ASSET_ARCHIVE}"
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/soh"
+    COMMAND ${CMAKE_COMMAND} -E rm -f "${EXTRACTOR_ASSET_ARCHIVE}"
+    COMMAND ${CMAKE_COMMAND} -E tar cf "${EXTRACTOR_ASSET_ARCHIVE}" --format=zip -- .
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/soh/assets/yml"
+    DEPENDS ${EXTRACTOR_MANIFEST_FILES}
+    COMMENT "Packing extractor manifests into extractor-assets.zip"
+    VERBATIM
+)
+add_custom_target(extractor_asset_archive ALL DEPENDS "${EXTRACTOR_ASSET_ARCHIVE}")
+add_dependencies(${PROJECT_NAME} extractor_asset_archive)
+
 add_custom_command(
     TARGET ${PROJECT_NAME}
     POST_BUILD
-    COMMENT "Copying asset ymls..."
-    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different ${CMAKE_SOURCE_DIR}/soh/assets/yml $<TARGET_FILE_DIR:soh>/assets
+    COMMENT "Copying extractor manifest archive..."
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${EXTRACTOR_ASSET_ARCHIVE}" "$<TARGET_FILE_DIR:soh>/extractor-assets.zip"
 )
 ################################################################################
 # Dependencies
@@ -618,15 +629,22 @@ add_dependencies(${PROJECT_NAME}
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
     find_package(glfw3 REQUIRED)
-    find_package(Ogg CONFIG REQUIRED)
+    if(MINGW)
+        find_package(Ogg REQUIRED)
+        find_package(Vorbis REQUIRED)
+        find_package(Opus REQUIRED)
+        find_package(OpusFile REQUIRED)
+    else()
+        find_package(Ogg CONFIG REQUIRED)
+        find_package(Vorbis CONFIG REQUIRED)
+        find_package(Opus CONFIG REQUIRED)
+        find_package(OpusFile CONFIG REQUIRED)
+    endif()
     link_libraries(Ogg::ogg)
 
-    find_package(Vorbis CONFIG REQUIRED)
     link_libraries(Vorbis::vorbisfile)
-    find_package(Opus CONFIG REQUIRED)
     link_libraries(Opus::opus)
-    find_package(OpusFile CONFIG REQUIRED)
-    link_libraries(OpusFile::opusfile CONFIG REQUIRED)
+    link_libraries(OpusFile::opusfile)
     if(SOH_WINDOWS_64BIT)
         set(ADDITIONAL_LIBRARY_DEPENDENCIES
             "libultraship;"
@@ -737,8 +755,11 @@ if(NOT CMAKE_SYSTEM_NAME MATCHES "Darwin|NintendoSwitch|CafeOS")
 INSTALL(TARGETS soh DESTINATION . COMPONENT ship)
 endif()
 
-if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+if (MSVC)
 INSTALL(FILES $<TARGET_PDB_FILE:soh> DESTINATION ./debug COMPONENT ship)
+endif()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "Windows")
 INSTALL(FILES ${CMAKE_BINARY_DIR}/soh/soh.o2r DESTINATION . COMPONENT ship)
 endif()
 
@@ -761,6 +782,18 @@ if(CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch|CafeOS")
     target_link_libraries(${PROJECT_NAME} PRIVATE "${ADDITIONAL_LIBRARY_DEPENDENCIES}" $<TARGET_OBJECTS:pathconf> )
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE "${ADDITIONAL_LIBRARY_DEPENDENCIES}")
+endif()
+
+if(MINGW)
+    # MSVC resolves these Windows SDK imports through project defaults and
+    # pragma directives. MinGW requires every import library explicitly.
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        sapi
+        shlwapi
+        ksuser
+        uuid
+        dbghelp
+    )
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "NintendoSwitch")

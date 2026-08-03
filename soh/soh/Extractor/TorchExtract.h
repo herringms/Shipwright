@@ -8,9 +8,9 @@
 // No torch types here; TorchExtract.cpp is the only TU that includes Companion.h.
 namespace SohTorch {
 
-// Count of .yml files under a version directory. Torch's phase callback fires once per file,
-// so this is the progress denominator.
-size_t CountAssetFiles(const std::string& ymlDir);
+// Count of .yml files under a version directory in either a directory or ZIP source.
+// Torch's phase callback fires once per file, so this is the progress denominator.
+size_t CountAssetFiles(const std::string& sourcePath, const std::string& versionDir);
 
 // Extracts romPath into destDir. Torch picks both the version directory under srcDir and the
 // archive name (oot.o2r, oot-mq.o2r) from config.yml by hashing the ROM, so the name it chose

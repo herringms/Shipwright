@@ -84,6 +84,7 @@
 #include "soh/Network/CrowdControl/CrowdControl.h"
 #include "soh/Network/Sail/Sail.h"
 #include "soh/Network/Anchor/Anchor.h"
+#include "soh/Network/HyruleCoop/HyruleCoop.h"
 #include "Enhancements/game-interactor/GameInteractor.h"
 #include "Enhancements/randomizer/draw.h"
 #include <libultraship/controller/controldeck/ControlDeck.h>
@@ -141,6 +142,7 @@ SpeechSynthesizer* SpeechSynthesizer::Instance;
 CrowdControl* CrowdControl::Instance;
 Sail* Sail::Instance;
 Anchor* Anchor::Instance;
+HyruleCoop::Manager* HyruleCoop::Manager::Instance;
 
 extern "C" char** cameraStrings;
 
@@ -364,6 +366,39 @@ bool IsSubpath(const std::filesystem::path& path, const std::filesystem::path& b
     return !rel.empty() && rel.native()[0] != '.';
 }
 
+#ifdef _WIN32
+bool RunAttrib(const std::wstring& arguments) {
+    wchar_t systemDirectory[MAX_PATH];
+    if (GetSystemDirectoryW(systemDirectory, _countof(systemDirectory)) == 0) {
+        return false;
+    }
+
+    std::filesystem::path attribPath = std::filesystem::path(systemDirectory) / L"attrib.exe";
+    std::wstring commandLine = L"\"" + attribPath.wstring() + L"\" " + arguments;
+    STARTUPINFOW startupInfo{};
+    PROCESS_INFORMATION processInfo{};
+    startupInfo.cb = sizeof(startupInfo);
+
+    if (!CreateProcessW(attribPath.c_str(), commandLine.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                        nullptr, &startupInfo, &processInfo)) {
+        return false;
+    }
+
+    WaitForSingleObject(processInfo.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(processInfo.hProcess, &exitCode);
+    CloseHandle(processInfo.hThread);
+    CloseHandle(processInfo.hProcess);
+    return exitCode == 0;
+}
+
+bool HydrateOneDriveTree(const std::filesystem::path& path) {
+    const std::wstring quotedPath = L"\"" + path.wstring() + L"\"";
+    const std::wstring quotedContents = L"\"" + (path / L"*").wstring() + L"\"";
+    return RunAttrib(L"+P -U " + quotedPath) && RunAttrib(L"+P -U " + quotedContents + L" /S /D");
+}
+#endif
+
 bool PathTestCleanup(FILE* tfile) {
     try {
         if (std::filesystem::exists("./text.txt"))
@@ -438,10 +473,13 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
     OSFatal();
 #endif
 
-    if (!std::filesystem::exists(installPath + "/assets")) {
+    const auto extractorArchive = std::filesystem::path(installPath) / "extractor-assets.zip";
+    const auto extractorDirectory = std::filesystem::path(installPath) / "assets";
+    if (!std::filesystem::is_regular_file(extractorArchive) &&
+        !std::filesystem::is_directory(extractorDirectory)) {
         SohGui::RegisterPopup("Extractor assets not found",
-                              "No O2R files found. Missing 'assets/' folder needed to generate OTR file.\nPlease "
-                              "re-extract them from the download or.\n\nExiting...",
+                              "No O2R files found. Missing 'extractor-assets.zip' archive or development 'assets/' "
+                              "folder needed to generate an O2R file.\nPlease re-extract the application download.\n\nExiting...",
                               "OK", "", [&]() { exit(1); });
     } else if (shouldRegen) {
         SohGui::RegisterPopup("Outdated ROM Archives",
@@ -548,15 +586,17 @@ void OTRGlobals::RunExtract(int argc, char* argv[]) {
                     }
                     case WS_ONEDRIVE: {
                         if (ownPath.string().find("OneDrive") != std::string::npos) {
-                            SohGui::RegisterPopup("SoH Path Error",
-                                                  "SoH appears to be in a OneDrive folder, which will cause issues.\n"
-                                                  "Please move it to a folder outside of OneDrive, like the root of a\n"
-                                                  "drive (e.g. \"C:\\Games\\SoH\").",
-                                                  "OK", "", [&]() { exit(0); });
-                        } else {
-                            windowsStep = WS_DONE;
-                            extractStep = args.empty() ? ES_EXTRACT : ES_EXTRACT_ARGS;
+                            if (!HydrateOneDriveTree(ownPath)) {
+                                SohGui::RegisterPopup(
+                                    "SoH OneDrive Error",
+                                    "SoH could not make its OneDrive folder always available offline.\n"
+                                    "Pin the folder with OneDrive's 'Always keep on this device' command and run again.",
+                                    "OK", "", [&]() { exit(0); });
+                                continue;
+                            }
                         }
+                        windowsStep = WS_DONE;
+                        extractStep = args.empty() ? ES_EXTRACT : ES_EXTRACT_ARGS;
                         continue;
                     }
                     default:
@@ -1563,6 +1603,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
     CrowdControl::Instance = new CrowdControl();
     Sail::Instance = new Sail();
     Anchor::Instance = new Anchor();
+    HyruleCoop::Manager::Instance = new HyruleCoop::Manager();
 
     OTRMessage_Init();
     OTRAudio_Init();
@@ -1589,6 +1630,7 @@ extern "C" void InitOTR(int argc, char* argv[]) {
 
     srand(static_cast<unsigned int>(now));
     SDLNet_Init();
+    HyruleCoop::Manager::Instance->ConfigureAutomatedTestFromEnvironment();
     if (CVarGetInteger(CVAR_REMOTE_CROWD_CONTROL("Enabled"), 0)) {
         CrowdControl::Instance->Enable();
     }
@@ -1619,6 +1661,8 @@ extern "C" void DeinitOTR() {
     if (CVarGetInteger(CVAR_REMOTE_ANCHOR("Enabled"), 0)) {
         Anchor::Instance->Disable();
     }
+    delete HyruleCoop::Manager::Instance;
+    HyruleCoop::Manager::Instance = nullptr;
     SDLNet_Quit();
 
     // Destroying gui here because we have shared ptrs to LUS objects which output to SPDLOG which is destroyed before

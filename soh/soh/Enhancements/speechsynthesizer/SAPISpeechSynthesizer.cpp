@@ -6,6 +6,7 @@
 //
 
 #include "SAPISpeechSynthesizer.h"
+#include <windows.h>
 #include <sapi.h>
 #include <thread>
 #include <string>

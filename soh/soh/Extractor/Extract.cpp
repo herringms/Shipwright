@@ -647,12 +647,17 @@ bool Extractor::CallTorch(std::string installPath, std::string exportdir, std::a
     snprintf(portVersion, 18, "%d.%d.%d", gBuildVersionMajor, gBuildVersionMinor, gBuildVersionPatch);
 
     std::string romPath = std::filesystem::absolute(mCurrentRomPath).string();
-    std::string srcDir = std::filesystem::absolute(installPath).string() + "/assets";
+    const auto installDirectory = std::filesystem::absolute(installPath);
+    const auto archiveSource = installDirectory / "extractor-assets.zip";
+    const auto directorySource = installDirectory / "assets";
+    std::error_code sourceEc;
+    const auto sourcePath = std::filesystem::is_regular_file(archiveSource, sourceEc) ? archiveSource : directorySource;
+    std::string srcDir = sourcePath.string();
     exportdir = std::filesystem::absolute(exportdir).string();
     // Work this out in the temporary folder
     std::string tempdir = Mkdtemp();
 
-    *totalExtract = SohTorch::CountAssetFiles(srcDir + "/" + GetTorchVersionDir());
+    *totalExtract = SohTorch::CountAssetFiles(srcDir, GetTorchVersionDir());
     *extractCount = 0;
 
     // config.yml decides whether this is oot.o2r or oot-mq.o2r.

@@ -1,6 +1,5 @@
 // Microsoft Visual C++ generated resource script.
 //
-#include <ship/resource/Resource.h>
 #include "properties.h"
 
 #define APSTUDIO_READONLY_SYMBOLS
@@ -112,4 +111,3 @@ IDI_ICON1               ICON                    "SHIPOFHARKINIAN.ico"
 
 /////////////////////////////////////////////////////////////////////////////
 #endif    // not APSTUDIO_INVOKED
-

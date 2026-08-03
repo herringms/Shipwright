@@ -8,27 +8,20 @@
 
 #include "Companion.h"
 #include "factories/BaseFactory.h"
+#include "utils/AssetSource.h"
 
 namespace fs = std::filesystem;
 
 namespace SohTorch {
 
-size_t CountAssetFiles(const std::string& ymlDir) {
-    std::error_code ec;
-    if (!fs::is_directory(ymlDir, ec)) {
+size_t CountAssetFiles(const std::string& sourcePath, const std::string& versionDir) {
+    try {
+        Torch::AssetSource source(sourcePath);
+        return source.CountFiles(fs::path(sourcePath) / versionDir, ".yml");
+    } catch (const std::exception& e) {
+        SPDLOG_ERROR("Failed to count extractor manifests in {}: {}", sourcePath, e.what());
         return 0;
     }
-
-    size_t count = 0;
-    for (fs::recursive_directory_iterator it(ymlDir, ec), end; it != end; it.increment(ec)) {
-        if (ec) {
-            break;
-        }
-        if (it->is_regular_file(ec) && it->path().extension() == ".yml") {
-            count++;
-        }
-    }
-    return count;
 }
 
 std::string Extract(const std::string& romPath, const std::string& srcDir, const std::string& destDir,
