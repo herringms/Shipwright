@@ -2,7 +2,8 @@ param(
     [string]$ExecutablePath,
     [string]$SeedSavePath,
     [int]$Port = 43493,
-    [int]$TimeoutSeconds = 120
+    [int]$TimeoutSeconds = 120,
+    [switch]$ExpectBuildMismatch
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +46,16 @@ Copy-Item -LiteralPath $SeedSavePath -Destination (Join-Path $clientDir "Save\fi
 [IO.File]::WriteAllText($hostReport, "")
 [IO.File]::WriteAllText($clientReport, "")
 
+if ($ExpectBuildMismatch) {
+    $markerBytes = [Text.Encoding]::ASCII.GetBytes("`nHYRULE_COOP_INTENTIONAL_BUILD_MISMATCH`n")
+    $clientStream = [IO.File]::Open($clientExe, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    try {
+        $clientStream.Write($markerBytes, 0, $markerBytes.Length)
+    } finally {
+        $clientStream.Dispose()
+    }
+}
+
 $savedEnvironment = @{}
 foreach ($name in @("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "HYRULE_COOP_TEST_PORT",
                      "HYRULE_COOP_TEST_REPORT", "HYRULE_COOP_TEST_ROLE", "HYRULE_COOP_TEST_ADDRESS",
@@ -76,6 +87,11 @@ try {
         Start-Sleep -Seconds 1
         $hostText = [IO.File]::ReadAllText($hostReport)
         $clientText = [IO.File]::ReadAllText($clientReport)
+        if ($ExpectBuildMismatch -and
+            $clientText -match "`tFAIL`tThe host and guest are running different builds") {
+            $outcome = "EXPECTED_BUILD_REJECTION"
+            break
+        }
         if ($hostText -match "`tFAIL`t" -or $clientText -match "`tFAIL`t") {
             $outcome = "FAIL"
             break
@@ -101,11 +117,15 @@ try {
             $actual = (Get-CimInstance Win32_Process -Filter "ProcessId=$($process.Id)").ExecutablePath
             if ($allowedExecutables -contains $actual) {
                 Stop-Process -Id $process.Id -Force
+                $null = $process.WaitForExit(5000)
             }
         }
     }
     foreach ($name in $savedEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
+    }
+    if ($ExpectBuildMismatch) {
+        Copy-Item -LiteralPath $hostExe -Destination $clientExe -Force
     }
 }
 
@@ -114,8 +134,31 @@ Get-Content -LiteralPath $hostReport
 Write-Host "Client report: $clientReport"
 Get-Content -LiteralPath $clientReport
 
+if ($ExpectBuildMismatch) {
+    $hostBuild = [regex]::Match($hostText, '(?m)^\d+\thost\tconfigured\t.*\bbuild=(\S+)').Groups[1].Value
+    $clientBuild = [regex]::Match($clientText, '(?m)^\d+\tclient\tconfigured\t.*\bbuild=(\S+)').Groups[1].Value
+    if ($outcome -ne "EXPECTED_BUILD_REJECTION" -or [string]::IsNullOrWhiteSpace($hostBuild) -or
+        [string]::IsNullOrWhiteSpace($clientBuild) -or $hostBuild -eq $clientBuild) {
+        throw "Hyrule Co-op exact-build rejection proof failed: $outcome"
+    }
+    Write-Host "Hyrule Co-op exact-build rejection proof: PASS"
+    Write-Host "Host fingerprint:   $hostBuild"
+    Write-Host "Client fingerprint: $clientBuild"
+    return
+}
+
 if ($outcome -ne "PASS") {
     throw "Hyrule Co-op localhost proof failed: $outcome"
 }
 
+$hostText = [IO.File]::ReadAllText($hostReport)
+$clientText = [IO.File]::ReadAllText($clientReport)
+$hostBuild = [regex]::Match($hostText, '(?m)^\d+\thost\tconfigured\t.*\bbuild=(\S+)').Groups[1].Value
+$clientBuild = [regex]::Match($clientText, '(?m)^\d+\tclient\tconfigured\t.*\bbuild=(\S+)').Groups[1].Value
+if ([string]::IsNullOrWhiteSpace($hostBuild) -or $hostBuild -ne $clientBuild -or
+    -not $hostBuild.StartsWith('hyrule-coop-poc.3+', [StringComparison]::Ordinal)) {
+    throw "Hyrule Co-op localhost proof did not report one matching exact-build fingerprint."
+}
+
 Write-Host "Hyrule Co-op localhost proof: PASS"
+Write-Host "Exact build fingerprint: $hostBuild"

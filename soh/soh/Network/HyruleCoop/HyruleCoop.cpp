@@ -9,11 +9,22 @@
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/item-tables/ItemTableManager.h"
 #include "soh/OTRGlobals.h"
+#include "ship/Context.h"
+#include "ship/utils/StrHash64.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <spdlog/spdlog.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 extern "C" {
 #include "functions.h"
@@ -52,10 +63,63 @@ constexpr int8_t kAutomatedTestHostMagic = 12;
 constexpr int8_t kAutomatedTestClientMagic = 36;
 constexpr int16_t kGohmaRoom = 1;
 constexpr uint32_t kGohmaRoomMask = 1u << kGohmaRoom;
-constexpr const char* kHyruleCoopCompatibilityId = "hyrule-coop-poc.2";
+constexpr const char* kHyruleCoopCompatibilityId = "hyrule-coop-poc.3";
+
+uint64_t HashFile(const std::filesystem::path& path, uint64_t hash) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) {
+        return hash;
+    }
+
+    std::array<char, 64 * 1024> buffer{};
+    while (stream) {
+        stream.read(buffer.data(), buffer.size());
+        const std::streamsize count = stream.gcount();
+        if (count > 0) {
+            hash = update_crc64(buffer.data(), static_cast<uint32_t>(count), hash);
+        }
+    }
+    return hash;
+}
+
+std::filesystem::path CurrentExecutablePath() {
+#ifdef _WIN32
+    std::wstring path(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (length > 0 && length < path.size()) {
+        path.resize(length);
+        return path;
+    }
+#elif defined(__linux__)
+    std::error_code error;
+    const auto path = std::filesystem::read_symlink("/proc/self/exe", error);
+    if (!error) {
+        return path;
+    }
+#endif
+    return {};
+}
 
 std::string CurrentBuildId() {
-    return std::string(gGitCommitHash) + "+" + kHyruleCoopCompatibilityId;
+    static const std::string buildId = []() {
+        uint64_t runtimeHash = INITIAL_CRC64;
+        const auto executablePath = CurrentExecutablePath();
+        if (!executablePath.empty()) {
+            runtimeHash = HashFile(executablePath, runtimeHash);
+        } else {
+            const auto* buildDate = reinterpret_cast<const char*>(gBuildDate);
+            runtimeHash = update_crc64(buildDate, static_cast<uint32_t>(std::strlen(buildDate)), runtimeHash);
+        }
+
+        const std::string portArchive = Ship::Context::LocateFileAcrossAppDirs("soh.o2r");
+        runtimeHash = HashFile(portArchive, runtimeHash);
+
+        std::ostringstream output;
+        output << kHyruleCoopCompatibilityId << "+" << gGitCommitHash << "+runtime-" << std::hex
+               << std::setfill('0') << std::setw(16) << runtimeHash;
+        return output.str();
+    }();
+    return buildId;
 }
 
 bool IsValidDurableSceneFlag(int16_t scene, int16_t flagType, int16_t flag) {
@@ -140,7 +204,7 @@ void Manager::ConfigureAutomatedTestFromEnvironment() {
     automatedTestClient = requestedRole == "client";
     automatedTestStage = TestAwaitingSave;
     automatedTestStageTick = 0;
-    ReportAutomatedTest("configured", "port=" + std::to_string(automatedTestPort));
+    ReportAutomatedTest("configured", "port=" + std::to_string(automatedTestPort) + " build=" + CurrentBuildId());
 
     const bool started = automatedTestClient
                              ? Join(automatedTestAddress, automatedTestPort, "Local Guest")
@@ -217,12 +281,25 @@ void Manager::Update() {
         ResetPeerState();
         observedConnectionGeneration = connectionGeneration;
     }
+
+    // A peer can send a final protocol response and close immediately afterward.
+    // Drain those packets before interpreting the terminal transport state so a
+    // specific handshake rejection is not replaced by a generic disconnect.
+    if (transportState != TransportState::Error && transportState != TransportState::Disconnected) {
+        BeginHandshakeIfNeeded();
+    }
+    for (const Packet& packet : transport.TakeIncomingPackets()) {
+        HandlePacket(packet);
+    }
+
     if (transportState == TransportState::Error) {
         DestroyRemotePlayer();
         remotePlayerSnapshot.reset();
-        protocolError = transport.GetLastError();
-        phase = ConnectionPhase::Failed;
-        if (automatedTestEnabled) {
+        if (phase != ConnectionPhase::Failed || protocolError.empty()) {
+            protocolError = transport.GetLastError();
+            phase = ConnectionPhase::Failed;
+        }
+        if (automatedTestEnabled && automatedTestStage != TestFailed) {
             FailAutomatedTest(protocolError);
         }
         return;
@@ -239,8 +316,13 @@ void Manager::Update() {
         } else {
             DestroyRemotePlayer();
             remotePlayerSnapshot.reset();
-            protocolError = "The host disconnected";
-            phase = ConnectionPhase::Failed;
+            if (phase != ConnectionPhase::Failed || protocolError.empty()) {
+                protocolError = "The host disconnected";
+                phase = ConnectionPhase::Failed;
+            }
+            if (automatedTestEnabled && automatedTestStage != TestFailed) {
+                FailAutomatedTest(protocolError);
+            }
         }
         return;
     }
@@ -251,11 +333,6 @@ void Manager::Update() {
         phase = ConnectionPhase::WaitingForPeer;
     } else if (transportState == TransportState::Connecting || transportState == TransportState::Starting) {
         phase = ConnectionPhase::Connecting;
-    }
-
-    BeginHandshakeIfNeeded();
-    for (const Packet& packet : transport.TakeIncomingPackets()) {
-        HandlePacket(packet);
     }
 
     if (handshakeComplete && transport.GetRole() == SessionRole::Host &&
@@ -615,6 +692,8 @@ void Manager::HandleHello(const Packet& packet) {
         return;
     }
     if (message->buildId != CurrentBuildId()) {
+        SPDLOG_WARN("[HyruleCoop] Rejected guest build {} because the host uses {}", message->buildId,
+                    CurrentBuildId());
         SendHelloAck(false, "The host and guest are running different builds");
         transport.DisconnectPeer();
         return;
@@ -663,6 +742,9 @@ void Manager::HandleHelloAck(const Packet& packet) {
     if (!message->accepted) {
         protocolError = message->reason.empty() ? "The host rejected the connection" : message->reason;
         phase = ConnectionPhase::Failed;
+        if (automatedTestEnabled) {
+            FailAutomatedTest(protocolError);
+        }
         return;
     }
 
