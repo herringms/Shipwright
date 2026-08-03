@@ -102,6 +102,7 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - Automatic reconnect UI
 - Authenticated pairing, encryption, NAT traversal, and invite services
 - Generic synchronization for every actor, puzzle, cutscene, and boss beyond Deku Baba and Gohma
+- Carried world actors and their player attachments, including pots held overhead, dropped, thrown, or broken
 - An explicit shared-progress export policy
 - MM player, enemy, quest, and Song of Time behavior adapters
 - Player-count difficulty scaling

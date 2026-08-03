@@ -156,6 +156,16 @@ boss adapter. The real-engine two-instance harness exercises those domains toget
 The next expansion should add actor and puzzle adapters one domain at a time, retain the same authority and replay
 contracts, and add each domain to the localhost proof before a remote build is packaged.
 
+### Live Remote Findings
+
+- A direct herri/Tillya session connected after router port `7777` was forwarded for both TCP and UDP.
+- A pot held over herri's head remained invisible to Tillya. This is a carried-world-actor replication gap, not an
+  inventory synchronization failure: the pot needs canonical ownership and lifecycle state plus attachment to the
+  carrying player's hand/held-above-head pose.
+- The next actor pass should prove pickup from either peer, source-world removal, remote hand attachment, carried
+  transform updates, drop, throw, break, and cleanup after scene change or disconnect. Add this sequence to the
+  two-instance localhost harness before producing another remote package.
+
 ## First Architectural Proof
 
 The architecture is demonstrated when two OoT instances can:
