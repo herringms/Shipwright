@@ -186,6 +186,11 @@ contracts, and add each domain to the localhost proof before a remote build is p
   static PoC ID. Treat the freeze and any non-obvious actor result from this session as provisional until reproduced
   with identical builds. Generate the advertised compatibility fingerprint from protocol-relevant source inputs and
   make the handshake reject differing fingerprints before the next remote test.
+- Zelda's Lullaby opened the Zora's Domain waterfall only for herri; Tillya had to play it independently. The gate uses
+  `EVENTCHKINF_OPENED_ZORAS_DOMAIN`, while Hyrule Co-op currently hooks only scene flags and does not synchronize
+  durable global event-check flags. Add host-owned world-event intents and snapshots with echo suppression. The first
+  acceptance case must open the already-loaded waterfall for both players after either player performs the song, then
+  remain open through scene changes and guest reconnect without replaying the song.
 
 ## First Architectural Proof
 

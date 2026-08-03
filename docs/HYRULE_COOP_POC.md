@@ -108,6 +108,8 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
   Cuccos whose remote carry proxies do not replace either player's interactive Cucco
 - Complete Deku Baba hit reactions, temporary pruning, drops, and regrowth beyond the synthetic permanent-death proof
 - Remote presentation of currently worn masks independently from shared ownership of those masks
+- Host-owned durable world-event flags, beginning with `EVENTCHKINF_OPENED_ZORAS_DOMAIN`, with immediate loaded-actor
+  reconciliation and reconnect replay
 - An explicit shared-progress export policy
 - MM player, enemy, quest, and Song of Time behavior adapters
 - Player-count difficulty scaling
