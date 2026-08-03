@@ -114,6 +114,8 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - Host-committed shared recovery and ammunition pickup effects while current health and ammunition balances remain
   participant-local
 - One-time finder notifications for unique durable pickups, without replay during snapshot or reconnect reconciliation
+- Bottle ownership independent of peer-local slot positions, with local ordinary contents and notified host-owned quest
+  content transitions such as Ruto's Letter
 - An explicit shared-progress export policy
 - MM player, enemy, quest, and Song of Time behavior adapters
 - Player-count difficulty scaling

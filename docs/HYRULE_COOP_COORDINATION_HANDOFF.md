@@ -206,6 +206,13 @@ contracts, and add each domain to the localhost proof before a remote build is p
   items. Notifications carry a commit ID and finder name, fire exactly once on live commit, and never replay when a
   reconnect snapshot reconstructs state. Heart Pieces and Containers should also apply their intended recovery to both
   local health pools while max-health progression remains shared.
+- Tillya's Ruto's Letter disappeared when herri picked up the letter, while her bottle remained. The current progression
+  state shares bottle ownership as a positional slot mask but does not serialize bottle contents, so reconciling peers
+  with different occupied bottle slots can silently clear content and recreate an empty bottle. Share bottle ownership
+  by count or stable container identity rather than peer-local slot position. Keep ordinary consumable contents local;
+  synchronize quest-content transitions such as obtaining or presenting Ruto's Letter through host-owned commits and
+  show both players a one-time notification explaining the shared inventory change. Never silently erase a nonempty
+  local bottle as a side effect of slot reconciliation.
 
 ## First Architectural Proof
 
