@@ -191,6 +191,11 @@ contracts, and add each domain to the localhost proof before a remote build is p
   durable global event-check flags. Add host-owned world-event intents and snapshots with echo suppression. The first
   acceptance case must open the already-loaded waterfall for both players after either player performs the song, then
   remain open through scene changes and guest reconnect without replaying the song.
+- Remote Links need their configured player names rendered overhead and their positions shown on the minimap. Reuse
+  Shipwright's existing actor name-tag and Anchor compass-icon rendering rather than introducing another HUD system.
+  Preserve both peer names during the handshake, enable both features by default, and expose separate Direct Co-op
+  toggles. A marker appears only in the same scene and, in dungeons, the currently displayed room; the remote marker
+  must remain visually distinct from the local player's marker. Off-scene pause-map locations can be a later extension.
 
 ## First Architectural Proof
 

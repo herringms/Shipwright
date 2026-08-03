@@ -110,6 +110,7 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - Remote presentation of currently worn masks independently from shared ownership of those masks
 - Host-owned durable world-event flags, beginning with `EVENTCHKINF_OPENED_ZORAS_DOMAIN`, with immediate loaded-actor
   reconciliation and reconnect replay
+- Enabled-by-default remote player name tags and same-scene minimap markers using existing Shipwright rendering hooks
 - An explicit shared-progress export policy
 - MM player, enemy, quest, and Song of Time behavior adapters
 - Player-count difficulty scaling
