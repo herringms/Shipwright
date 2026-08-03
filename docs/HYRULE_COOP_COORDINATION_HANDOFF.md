@@ -165,6 +165,12 @@ contracts, and add each domain to the localhost proof before a remote build is p
 - The next actor pass should prove pickup from either peer, source-world removal, remote hand attachment, carried
   transform updates, drop, throw, break, and cleanup after scene change or disconnect. Add this sequence to the
   two-instance localhost harness before producing another remote package.
+- A host side-slash left Deku Babas alive on the guest. The existing harness proves only its synthetic permanent-death
+  path; it does not cover the vanilla pruned, temporary-death, and regrowth lifecycle. Replicate those canonical action
+  phases and test vertical and horizontal cuts from both peers, including synchronized regrowth and item drops.
+- Tillya could not see herri's equipped Bunny Hood. `PlayerSnapshotMessage` carries boots, shield, tunic, item action,
+  and model state but omits `Player.currentMask`. Add the worn mask to remote presentation state and verify equip,
+  unequip, scene transition, and reconnect independently from durable mask ownership.
 
 ## First Architectural Proof
 
