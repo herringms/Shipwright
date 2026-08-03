@@ -1,0 +1,24 @@
+Hyrule Co-op for Windows
+
+Start HyruleCoop.exe. Do not start soh.exe from a Runtime folder.
+
+The first launch installs the bundled, verified game runtime under:
+%LOCALAPPDATA%\HyruleCoop\Runtime
+
+It checks only the immediate sibling folders beside this bootstrap for an existing Shipwright installation. It does
+not recursively search the computer or follow junctions. A folder must contain soh.exe plus an O2R, save, or known
+Shipwright log before it is offered. You can also choose an installation or ROM manually.
+
+Imported O2Rs, settings, mods, and saves are copied without modifying their original files. Copying a ROM into
+AppData is always a separate, explicit choice. Player data remains under %LOCALAPPDATA%\HyruleCoop and is not part
+of game runtime updates.
+
+The launcher records the SHA-256 and generated-asset schema of each O2R. If a future runtime requires regenerated
+assets, the old O2R is preserved and the launcher reports the mismatch instead of silently treating it as current.
+
+On later launches, HyruleCoop.exe checks the latest published GitHub Release. A complete runtime update is downloaded
+to staging, verified with SHA-256, installed into a new version directory, and selected only after every managed file
+passes verification. If GitHub cannot be reached, the installed version starts normally. The prior runtime remains
+available for rollback and is restored automatically if the selected runtime later fails integrity verification.
+
+Neither Git nor a GitHub account is required. Do not share a ROM, generated oot.o2r, save, settings, mods, or logs.

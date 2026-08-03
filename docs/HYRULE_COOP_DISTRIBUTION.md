@@ -6,14 +6,17 @@ Hyrule Co-op stores Windows saves under `%LOCALAPPDATA%\HyruleCoop\Save`, indepe
 Save slots are `file*.sav`; `global.sav` contains global metadata. The first compatible launch can copy saves from a
 nearby legacy portable installation into that location without deleting the originals.
 
-The baseline Hyrule Co-op package is installed once. Each player supplies a supported ROM and generates `oot.o2r`
-locally. ROMs, generated O2R archives, mods, logs, and `shipofharkinian.json` remain installation-local in this proof
-of concept. Do not distribute a ROM, generated O2R archive, or another player's saves.
+The Hyrule Co-op bootstrap package is installed once. Each player supplies a supported ROM or imports an existing
+locally generated `oot.o2r`. ROMs, generated O2R archives, mods, logs, and `shipofharkinian.json` live under
+`%LOCALAPPDATA%\HyruleCoop\UserData`; saves live under `%LOCALAPPDATA%\HyruleCoop\Save`. They are never part of a
+published runtime. Do not distribute a ROM, generated O2R archive, or another player's saves.
 
 ## Updates
 
-Routine Hyrule Co-op releases use a small update ZIP instead of replacing the installation. Extract the update ZIP
-into the existing Hyrule Co-op folder, close Shipwright, and run `Apply Hyrule Co-op Update.cmd`.
+Routine Hyrule Co-op releases are published as immutable GitHub Release assets. Players start `HyruleCoop.exe`; the
+launcher checks the fixed release manifest, downloads the complete runtime, verifies its ZIP and every managed file,
+installs it into a new AppData version directory, and switches versions only after validation. Git and a GitHub
+account are not required.
 
 Updates carry the complete managed runtime as one tested set: the executable, port archive, extractor archive,
 runtime DLLs, controller database, and package instructions. This prevents a new executable from being combined with
@@ -28,17 +31,22 @@ The updater verifies every managed payload file and preserves these installation
 - `logs`
 - `shipofharkinian.json`
 
-It stores replaced managed files under `_hyrule_backup/<patch-id>` for rollback.
+The previous versioned runtime remains available for rollback. The older manual update ZIP remains a development
+recovery path, not the normal player workflow.
 
 The first launch may create or expand `shipofharkinian.json`, create `logs` and `mods`, generate `oot.o2r` from the
-player's ROM, and initialize or migrate `%LOCALAPPDATA%\HyruleCoop\Save`. A newer baseline must not be extracted over
-that installation; apply an update ZIP so installation-local files remain intact.
+player's ROM, and initialize or migrate `%LOCALAPPDATA%\HyruleCoop\Save`. Players retain the original
+`HyruleCoop.exe`; later releases are installed automatically into new version directories.
 
 ## Release gate
 
-`scripts/windows/New-HyruleCoopBaseline.ps1` constructs the full package from an explicit allowlist in a clean staging
-directory. It runs localhost, proves first-run O2R extraction using a locally supplied ROM, and rejects ROMs, O2R
-archives, saves, logs, mods, or personal configuration in the resulting ZIP.
+`scripts/windows/New-HyruleCoopRelease.ps1` constructs the GitHub runtime assets and one-time bootstrap from an
+explicit allowlist. It requires an explicit private test save, runs both matching-build and mismatched-build
+localhost gates, and rejects ROMs, generated O2R archives, saves, logs, mods, or personal configuration in the
+resulting ZIPs.
+
+`scripts/windows/Test-HyruleCoopLauncher.ps1` proves bootstrap delegation, conservative import, runtime installation,
+player-data preservation, rollback, and offline launch.
 
 `scripts/windows/New-HyruleCoopUpdate.ps1` runs the complete two-instance localhost proof before producing a patch.
 It then applies the staged update to a disposable installation, verifies the complete managed runtime, and proves
