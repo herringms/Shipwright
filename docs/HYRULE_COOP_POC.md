@@ -102,7 +102,8 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - Automatic reconnect UI
 - Authenticated pairing, encryption, NAT traversal, and invite services
 - Generic synchronization for every actor, puzzle, cutscene, and boss beyond Deku Baba and Gohma
-- Carried world actors and their player attachments, including pots held overhead, dropped, thrown, or broken
+- Carried world actors and their player attachments, including pots and Cuccos held overhead, dropped, thrown, or
+  released without duplicate world and attachment visuals
 - Complete Deku Baba hit reactions, temporary pruning, drops, and regrowth beyond the synthetic permanent-death proof
 - Remote presentation of currently worn masks independently from shared ownership of those masks
 - An explicit shared-progress export policy
