@@ -452,6 +452,7 @@ _deps
 _packages
 */extract_assets_cmake*
 /build*
+/dist/
 
 soh/src/boot/build.c
 soh/properties.h
