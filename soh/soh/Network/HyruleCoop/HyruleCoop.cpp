@@ -84,7 +84,7 @@ constexpr int8_t kAutomatedTestClientMagic = 36;
 constexpr int16_t kGohmaRoom = 1;
 constexpr uint32_t kGohmaRoomMask = 1u << kGohmaRoom;
 constexpr uint32_t kGuestAttackCooldownFrames = 6;
-constexpr uint32_t kGuestAttackEvidenceWindowFrames = 20;
+constexpr int64_t kGuestAttackStateWindowFrames = 90;
 constexpr const char* kHyruleCoopCompatibilityId = "hyrule-coop-poc.3";
 
 uint64_t HashFile(const std::filesystem::path& path, uint64_t hash) {
@@ -163,10 +163,29 @@ uint64_t SceneStreamId(int16_t scene) {
     return static_cast<uint64_t>(static_cast<uint16_t>(scene)) + 1;
 }
 
+bool SamePresentation(const PlayerPresentationMessage& first, const PlayerPresentationMessage& second) {
+    return first.scope == second.scope && first.boots == second.boots && first.shield == second.shield &&
+           first.tunic == second.tunic && first.currentMask == second.currentMask &&
+           first.buttonItem == second.buttonItem && first.itemAction == second.itemAction &&
+           first.heldItemAction == second.heldItemAction && first.modelGroup == second.modelGroup;
+}
+
+void ApplyPresentation(PlayerSnapshotMessage& player, const PlayerPresentationMessage& presentation) {
+    player.boots = presentation.boots;
+    player.shield = presentation.shield;
+    player.tunic = presentation.tunic;
+    player.currentMask = presentation.currentMask;
+    player.buttonItem = presentation.buttonItem;
+    player.itemAction = presentation.itemAction;
+    player.heldItemAction = presentation.heldItemAction;
+    player.modelGroup = presentation.modelGroup;
+}
+
 const CapabilityList& SupportedCapabilities() {
     static const CapabilityList capabilities = NormalizeCapabilities(
         { Capability::Coordination, Capability::RequestLedger, Capability::OotClock, Capability::OotPlayer,
-          Capability::OotSceneFlags, Capability::OotDekuBaba, Capability::OotGuestAttack,
+          Capability::OotPlayerPresentation, Capability::OotSceneFlags, Capability::OotDekuBaba,
+          Capability::OotGuestAttack,
           Capability::OotCollectible, Capability::OotSharedProgression, Capability::OotGohma })
                                                    .value();
     return capabilities;
@@ -449,6 +468,10 @@ const PlayerSnapshotMessage* Manager::GetRemotePlayerSnapshot() const {
     return remotePlayerSnapshot.has_value() ? &remotePlayerSnapshot.value() : nullptr;
 }
 
+const std::string& Manager::GetRemotePlayerName() const {
+    return remotePlayerName;
+}
+
 void Manager::SanitizeSaveCopy(void* saveContextRef) const {
     if (!saveOverlayCaptured || saveContextRef == nullptr) {
         return;
@@ -556,6 +579,7 @@ void Manager::RegisterHooks(bool enabled) {
         if (!handshakeComplete) {
             return;
         }
+        SendPlayerPresentation();
         SendPlayerSnapshot();
         if (remotePlayer == nullptr) {
             RefreshRemotePlayer();
@@ -685,16 +709,22 @@ void Manager::RegisterHooks(bool enabled) {
 
 void Manager::ResetPeerState() {
     DestroyRemotePlayer();
+    transport.DisableRealtime();
     helloSent = false;
     handshakeComplete = false;
     playerId = 0;
+    remotePlayerName.clear();
     remotePlayerSnapshot.reset();
+    remotePlayerPresentation.reset();
+    lastSentPlayerPresentation.reset();
+    nextPlayerPresentationRevision = 1;
     lastRemoteMeleeTick = 0;
     lastRemoteMeleeScene = -1;
     preparingRemotePlayer = false;
     applyingAuthoritativeState = false;
     negotiatedCapabilities.clear();
     pendingGuestAttacks.clear();
+    pendingGuestAttackRequests.clear();
     lastGuestAttackTick.clear();
     protocolError.clear();
 }
@@ -750,6 +780,9 @@ void Manager::HandlePacket(const Packet& packet) {
             break;
         case MessageType::PlayerSnapshot:
             HandlePlayerSnapshot(packet);
+            break;
+        case MessageType::PlayerPresentation:
+            HandlePlayerPresentation(packet);
             break;
         case MessageType::SnapshotRequest:
             HandleSnapshotRequest(packet);
@@ -826,7 +859,9 @@ void Manager::HandleHello(const Packet& packet) {
     }
 
     playerId = 1;
+    remotePlayerName = message->playerName.empty() ? "Guest" : message->playerName.substr(0, 24);
     negotiatedCapabilities = IntersectCapabilities(SupportedCapabilities(), message->capabilities);
+    transport.ConfigureRealtime(sessionScope, 2, guestTokenHigh, guestTokenLow);
     SendHelloAck(true, "");
     handshakeComplete = true;
     phase = IsSaveLoaded() ? ConnectionPhase::Handshaking : ConnectionPhase::Ready;
@@ -867,12 +902,14 @@ void Manager::HandleHelloAck(const Packet& packet) {
         return;
     }
     playerId = message->participantId;
+    remotePlayerName = message->playerName.empty() ? "Host" : message->playerName.substr(0, 24);
     sessionScope = { message->sessionEpoch, message->worldGeneration };
     resumeSessionEpoch = message->sessionEpoch;
     resumeParticipantId = message->participantId;
     resumeTokenHigh = message->resumeTokenHigh;
     resumeTokenLow = message->resumeTokenLow;
     negotiatedCapabilities = message->capabilities;
+    transport.ConfigureRealtime(sessionScope, playerId, resumeTokenHigh, resumeTokenLow);
     handshakeComplete = true;
     phase = IsSaveLoaded() ? ConnectionPhase::Handshaking : ConnectionPhase::Ready;
     SendSnapshotRequest();
@@ -897,10 +934,10 @@ void Manager::HandlePlayerSnapshot(const Packet& packet) {
     if (!handshakeComplete) {
         return;
     }
-    const auto message = DecodePlayerSnapshot(packet.payload);
+    auto message = DecodePlayerSnapshot(packet.payload);
     if (!message.has_value() || !IsCurrentScope(message->scope) ||
         (message->linkAge != LINK_AGE_ADULT && message->linkAge != LINK_AGE_CHILD) ||
-        message->modelGroup >= PLAYER_MODELGROUP_MAX) {
+        message->modelGroup >= PLAYER_MODELGROUP_MAX || message->currentMask >= PLAYER_MASK_MAX) {
         SPDLOG_WARN("[HyruleCoop] Ignoring invalid player snapshot");
         return;
     }
@@ -923,10 +960,31 @@ void Manager::HandlePlayerSnapshot(const Packet& packet) {
 
     const bool needsRespawn = !remotePlayerSnapshot.has_value() ||
                               remotePlayerSnapshot->linkAge != message->linkAge;
+    if (remotePlayerPresentation.has_value()) {
+        ApplyPresentation(*message, *remotePlayerPresentation);
+    }
     remotePlayerSnapshot = message;
     if (needsRespawn) {
         DestroyRemotePlayer();
         RefreshRemotePlayer();
+    }
+}
+
+void Manager::HandlePlayerPresentation(const Packet& packet) {
+    if (!handshakeComplete) {
+        return;
+    }
+    const auto message = DecodePlayerPresentation(packet.payload);
+    if (!message.has_value() || !IsCurrentScope(message->scope) || message->currentMask >= PLAYER_MASK_MAX ||
+        message->modelGroup >= PLAYER_MODELGROUP_MAX ||
+        (remotePlayerPresentation.has_value() && message->revision <= remotePlayerPresentation->revision)) {
+        SPDLOG_WARN("[HyruleCoop] Ignoring invalid or stale player presentation");
+        return;
+    }
+
+    remotePlayerPresentation = message;
+    if (remotePlayerSnapshot.has_value()) {
+        ApplyPresentation(*remotePlayerSnapshot, *message);
     }
 }
 
@@ -1015,7 +1073,12 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
         !IsCurrentScope(message->scope) || message->scene < 0 || message->scene >= SCENE_ID_MAX) {
         return;
     }
-    pendingGuestAttacks.erase(message->entityId);
+    if (message->acknowledgedRequestId != 0) {
+        const auto pending = pendingGuestAttackRequests.find(message->entityId);
+        if (pending != pendingGuestAttackRequests.end() && pending->second == message->acknowledgedRequestId) {
+            ClearPendingGuestAttack(message->entityId);
+        }
+    }
     const auto existing = actorSnapshots.find(message->entityId);
     if (existing != actorSnapshots.end() && existing->second.hostTick > message->hostTick) {
         return;
@@ -1028,7 +1091,7 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
         }
         if (!message->alive) {
             Actor_Kill(static_cast<Actor*>(local->second));
-            pendingGuestAttacks.erase(message->entityId);
+            ClearPendingGuestAttack(message->entityId);
             lastGuestAttackTick.erase(message->entityId);
             localDekuBabas.erase(local);
             return;
@@ -1041,7 +1104,7 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
         }
         if (!message->alive) {
             Actor_Kill(static_cast<Actor*>(local->second));
-            pendingGuestAttacks.erase(message->entityId);
+            ClearPendingGuestAttack(message->entityId);
             lastGuestAttackTick.erase(message->entityId);
             localGohmas.erase(local);
             return;
@@ -1113,7 +1176,9 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     if (lookup == RequestLookup::Replay) {
         const auto snapshot = actorSnapshots.find(message->entityId);
         if (snapshot != actorSnapshots.end()) {
-            transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(snapshot->second), message->entityId);
+            ActorSnapshotMessage response = snapshot->second;
+            response.acknowledgedRequestId = message->requestId;
+            transport.SendReliable(MessageType::ActorSnapshot, EncodeActorSnapshot(response), message->entityId);
         }
         return;
     }
@@ -1125,13 +1190,15 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     const auto state = actorSnapshots.find(message->entityId);
     const auto baba = localDekuBabas.find(message->entityId);
     const auto gohma = localGohmas.find(message->entityId);
-    const bool hasRecentMeleeEvidence =
-        lastRemoteMeleeTick != 0 && lastRemoteMeleeScene == message->scene &&
-        message->playerTick >= lastRemoteMeleeTick &&
-        message->playerTick - lastRemoteMeleeTick <= kGuestAttackEvidenceWindowFrames;
+    const int64_t attackStateDelta = static_cast<int64_t>(message->playerTick) -
+                                     static_cast<int64_t>(remotePlayerSnapshot.has_value()
+                                                              ? remotePlayerSnapshot->tick
+                                                              : message->playerTick);
+    const bool hasContemporaryPlayerState =
+        attackStateDelta >= -kGuestAttackStateWindowFrames && attackStateDelta <= kGuestAttackStateWindowFrames;
     if (state != actorSnapshots.end() && state->second.alive &&
         remotePlayerSnapshot.has_value() && remotePlayerSnapshot->scene == message->scene &&
-        hasRecentMeleeEvidence &&
+        hasContemporaryPlayerState &&
         state->second.scene == message->scene &&
         DistanceSquared(remotePlayerSnapshot->position, state->second.position) <= 350.0f * 350.0f) {
         if (message->attackKind == 1 && baba != localDekuBabas.end()) {
@@ -1152,8 +1219,11 @@ void Manager::HandleAttackIntent(const Packet& packet) {
         }
     }
     requestLedger.Record(request, { accepted, message->entityId, frameCounter });
-    if (!accepted && state != actorSnapshots.end()) {
-        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(state->second), message->entityId);
+    const auto authoritativeState = actorSnapshots.find(message->entityId);
+    if (authoritativeState != actorSnapshots.end()) {
+        ActorSnapshotMessage response = authoritativeState->second;
+        response.acknowledgedRequestId = message->requestId;
+        transport.SendReliable(MessageType::ActorSnapshot, EncodeActorSnapshot(response), message->entityId);
     }
 }
 
@@ -1296,6 +1366,7 @@ void Manager::SendHello() {
 void Manager::SendHelloAck(bool accepted, const std::string& reason) {
     HelloAckMessage message;
     message.accepted = accepted;
+    message.playerName = accepted ? playerName.substr(0, 24) : "";
     message.participantId = accepted ? 2 : 0;
     message.sessionEpoch = sessionScope.sessionEpoch;
     message.worldGeneration = sessionScope.worldGeneration;
@@ -1346,6 +1417,7 @@ void Manager::SendPlayerSnapshot() {
     message.boots = player->currentBoots;
     message.shield = player->currentShield;
     message.tunic = player->currentTunic;
+    message.currentMask = player->currentMask;
     message.stateFlags1 = player->stateFlags1;
     message.stateFlags2 = player->stateFlags2 & ~PLAYER_STATE2_DISABLE_DRAW;
     message.buttonItem = gSaveContext.equips.buttonItems[0];
@@ -1364,6 +1436,32 @@ void Manager::SendPlayerSnapshot() {
     // reaches the peer. Combat-active frames use their tick as a one-shot stream while normal movement stays on 0.
     const uint64_t streamId = message.meleeWeaponState > 0 ? message.tick : 0;
     transport.Send(MessageType::PlayerSnapshot, EncodePlayerSnapshot(message), streamId);
+}
+
+void Manager::SendPlayerPresentation() {
+    if (!handshakeComplete || !IsSaveLoaded()) {
+        return;
+    }
+
+    const Player* player = GET_PLAYER(gPlayState);
+    PlayerPresentationMessage message;
+    message.scope = sessionScope;
+    message.boots = player->currentBoots;
+    message.shield = player->currentShield;
+    message.tunic = player->currentTunic;
+    message.currentMask = player->currentMask;
+    message.buttonItem = gSaveContext.equips.buttonItems[0];
+    message.itemAction = player->itemAction;
+    message.heldItemAction = player->heldItemAction;
+    message.modelGroup = player->modelGroup;
+    if (lastSentPlayerPresentation.has_value() && SamePresentation(message, *lastSentPlayerPresentation)) {
+        return;
+    }
+
+    message.revision = nextPlayerPresentationRevision++;
+    if (transport.Send(MessageType::PlayerPresentation, EncodePlayerPresentation(message))) {
+        lastSentPlayerPresentation = message;
+    }
 }
 
 void Manager::SendSnapshotRequest() {
@@ -1435,7 +1533,17 @@ void Manager::SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackK
     message.playerTick = frameCounter;
     message.scene = scene;
     message.attackKind = attackKind;
-    transport.Send(MessageType::AttackIntent, EncodeAttackIntent(message));
+    if (transport.SendRepeatedRealtime(MessageType::AttackIntent, EncodeAttackIntent(message), message.entityId)) {
+        pendingGuestAttackRequests[entityId] = message.requestId;
+    } else {
+        ClearPendingGuestAttack(entityId);
+    }
+}
+
+void Manager::ClearPendingGuestAttack(uint64_t entityId) {
+    transport.CancelRepeatedRealtime(MessageType::AttackIntent, entityId);
+    pendingGuestAttackRequests.erase(entityId);
+    pendingGuestAttacks.erase(entityId);
 }
 
 void Manager::SendCollectibleIntent(int16_t scene, int16_t flagType, int16_t flag) {
@@ -1562,7 +1670,7 @@ void Manager::ApplyDekuBabaAuthority(void* actor, bool* shouldUpdate) {
     if (snapshot != actorSnapshots.end()) {
         if (!snapshot->second.alive) {
             Actor_Kill(static_cast<Actor*>(actor));
-            pendingGuestAttacks.erase(entityId);
+            ClearPendingGuestAttack(entityId);
             lastGuestAttackTick.erase(entityId);
             localDekuBabas.erase(entityId);
         } else {
@@ -1578,7 +1686,7 @@ void Manager::ApplyDekuBabaAuthority(void* actor, bool* shouldUpdate) {
 void Manager::ForgetDekuBaba(void* actor) {
     for (auto iterator = localDekuBabas.begin(); iterator != localDekuBabas.end();) {
         if (iterator->second == actor) {
-            pendingGuestAttacks.erase(iterator->first);
+            ClearPendingGuestAttack(iterator->first);
             lastGuestAttackTick.erase(iterator->first);
             iterator = localDekuBabas.erase(iterator);
         } else {
@@ -1646,7 +1754,7 @@ void Manager::ApplyGohmaAuthority(void* actor, bool* shouldUpdate) {
     if (snapshot != actorSnapshots.end()) {
         if (!snapshot->second.alive) {
             Actor_Kill(static_cast<Actor*>(actor));
-            pendingGuestAttacks.erase(entityId);
+            ClearPendingGuestAttack(entityId);
             lastGuestAttackTick.erase(entityId);
             localGohmas.erase(entityId);
         } else {
@@ -1660,7 +1768,7 @@ void Manager::ApplyGohmaAuthority(void* actor, bool* shouldUpdate) {
 void Manager::ForgetGohma(void* actor) {
     for (auto iterator = localGohmas.begin(); iterator != localGohmas.end();) {
         if (iterator->second == actor) {
-            pendingGuestAttacks.erase(iterator->first);
+            ClearPendingGuestAttack(iterator->first);
             lastGuestAttackTick.erase(iterator->first);
             iterator = localGohmas.erase(iterator);
         } else {
@@ -1914,6 +2022,7 @@ void Manager::CompleteBarrierIfReady() {
 
     // Replay each canonical domain only after both players are in the target scene.
     SendClockSnapshot();
+    SendPlayerPresentation();
     SendPlayerSnapshot();
     SendSceneFlagsSnapshot(barrierCoordinator.GetState().targetScene);
     SendProgressionSnapshot();

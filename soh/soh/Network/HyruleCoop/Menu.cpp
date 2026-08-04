@@ -14,7 +14,8 @@ void DrawDirectCoopMenu(WidgetInfo&) {
     uint16_t port = CVarGetInteger(CVAR_REMOTE_HYRULE_COOP("Port"), 43390);
 
     ImGui::SeparatorText("Hyrule Co-op Proof of Concept 2");
-    ImGui::TextWrapped("Host creates the shared world. Join connects directly to the host address using the same TCP port.");
+    ImGui::TextWrapped(
+        "Host creates the shared world. Join connects directly to the host address using the same TCP and UDP port.");
     ImGui::Spacing();
 
     ImGui::BeginDisabled(manager->IsActive());
@@ -32,7 +33,7 @@ void DrawDirectCoopMenu(WidgetInfo&) {
         Ship::Context::GetRawInstance()->GetWindow()->GetGui()->SaveConsoleVariablesNextFrame();
     }
 
-    ImGui::Text("TCP Port");
+    ImGui::Text("TCP + UDP Port");
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
     UIWidgets::PushStyleInput(THEME_COLOR);
     if (ImGui::InputScalar("##HyruleCoopPort", ImGuiDataType_U16, &port)) {

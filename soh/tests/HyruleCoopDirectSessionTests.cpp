@@ -37,9 +37,23 @@ static std::vector<Packet> WaitForPackets(DirectSession& session, std::chrono::m
     return {};
 }
 
+static bool WaitForRealtime(DirectSession& host, DirectSession& guest, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (host.IsRealtimeReady() && guest.IsRealtimeReady()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
 int main() {
     assert(SDL_Init(0) == 0);
     assert(SDLNet_Init() == 0);
+    assert(SDL_setenv("HYRULE_COOP_TEST_UDP_DROP_EVERY", "3", 1) == 0);
+    assert(SDL_setenv("HYRULE_COOP_TEST_UDP_DELAY_MS", "10", 1) == 0);
+    assert(SDL_setenv("HYRULE_COOP_TEST_UDP_REORDER_PAIRS", "1", 1) == 0);
 
     DirectSession host;
     DirectSession guest;
@@ -67,9 +81,13 @@ int main() {
 
     HelloAckMessage ack;
     ack.accepted = true;
+    ack.playerName = "Host Link";
     ack.participantId = 2;
     ack.sessionEpoch = 100;
+    ack.resumeTokenHigh = 0x1234;
+    ack.resumeTokenLow = 0x5678;
     ack.capabilities = hello.capabilities;
+    host.ConfigureRealtime({ 100, 0 }, 2, ack.resumeTokenHigh, ack.resumeTokenLow);
     assert(host.Send(MessageType::HelloAck, EncodeHelloAck(ack)));
     const std::vector<Packet> guestPackets = WaitForPackets(guest, std::chrono::seconds(2));
     assert(guestPackets.size() == 1);
@@ -78,6 +96,46 @@ int main() {
     assert(receivedAck.has_value());
     assert(receivedAck->accepted);
     assert(receivedAck->participantId == 2);
+    assert(receivedAck->playerName == "Host Link");
+    guest.ConfigureRealtime({ 100, 0 }, 2, ack.resumeTokenHigh, ack.resumeTokenLow);
+    assert(WaitForRealtime(host, guest, std::chrono::seconds(2)));
+
+    AttackIntentMessage attack;
+    attack.scope = { 100, 0 };
+    attack.participantId = 2;
+    attack.requestId = 77;
+    attack.entityId = 0xBABA;
+    attack.playerTick = 42;
+    attack.scene = 1;
+    attack.attackKind = 1;
+    assert(guest.SendRepeatedRealtime(MessageType::AttackIntent, EncodeAttackIntent(attack), attack.entityId, 40,
+                                      400));
+    std::this_thread::sleep_for(std::chrono::milliseconds(180));
+    const std::vector<Packet> attackPackets = host.TakeIncomingPackets();
+    assert(attackPackets.size() >= 2);
+    const uint32_t attackSequence = attackPackets.front().sequence;
+    for (const Packet& packet : attackPackets) {
+        assert(packet.type == MessageType::AttackIntent);
+        assert(packet.sequence == attackSequence);
+        const auto receivedAttack = DecodeAttackIntent(packet.payload);
+        assert(receivedAttack.has_value());
+        assert(receivedAttack->requestId == attack.requestId);
+        assert(receivedAttack->entityId == attack.entityId);
+    }
+    guest.CancelRepeatedRealtime(MessageType::AttackIntent, attack.entityId);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    host.TakeIncomingPackets();
+
+    ActorSnapshotMessage attackResult;
+    attackResult.scope = { 100, 0 };
+    attackResult.entityId = attack.entityId;
+    attackResult.acknowledgedRequestId = attack.requestId;
+    attackResult.actorId = 1;
+    attackResult.alive = true;
+    assert(host.SendReliable(MessageType::ActorSnapshot, EncodeActorSnapshot(attackResult), attackResult.entityId));
+    const std::vector<Packet> attackResultPackets = WaitForPackets(guest, std::chrono::seconds(2));
+    assert(attackResultPackets.size() == 1);
+    assert(attackResultPackets[0].type == MessageType::ActorSnapshot);
 
     for (uint32_t tick = 0; tick < 100; ++tick) {
         PlayerSnapshotMessage snapshot;
@@ -89,28 +147,63 @@ int main() {
         progression.scope = { 100, 0 };
         progression.revision = tick;
         assert(host.Send(MessageType::ProgressionSnapshot, EncodeProgressionSnapshot(progression), 1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     const std::vector<Packet> snapshots = guest.TakeIncomingPackets();
-    assert(snapshots.size() == 3);
+    bool foundProgression = false;
+    bool foundFirstPlayer = false;
+    bool foundSecondPlayer = false;
     for (const Packet& packet : snapshots) {
         if (packet.type == MessageType::ProgressionSnapshot) {
             const auto progression = DecodeProgressionSnapshot(packet.payload);
             assert(packet.streamId == 1);
             assert(progression.has_value());
             assert(progression->revision == 99);
+            foundProgression = true;
             continue;
         }
         assert(packet.type == MessageType::PlayerSnapshot);
         const auto latestSnapshot = DecodePlayerSnapshot(packet.payload);
         assert(latestSnapshot.has_value());
         if (packet.streamId == 11) {
-            assert(latestSnapshot->tick == 99);
+            assert(latestSnapshot->tick >= 90);
+            foundFirstPlayer = true;
         } else {
             assert(packet.streamId == 22);
-            assert(latestSnapshot->tick == 1099);
+            assert(latestSnapshot->tick >= 1090);
+            foundSecondPlayer = true;
         }
     }
+    assert(foundProgression);
+    assert(foundFirstPlayer);
+    assert(foundSecondPlayer);
+
+    host.DisableRealtime();
+    assert(!host.IsRealtimeReady());
+
+    attack.requestId = 78;
+    attack.entityId = 0xBABB;
+    assert(guest.SendRepeatedRealtime(MessageType::AttackIntent, EncodeAttackIntent(attack), attack.entityId, 40,
+                                      160));
+    const std::vector<Packet> fallbackAttackPackets = WaitForPackets(host, std::chrono::seconds(2));
+    assert(fallbackAttackPackets.size() == 1);
+    assert(fallbackAttackPackets[0].type == MessageType::AttackIntent);
+    const auto fallbackAttack = DecodeAttackIntent(fallbackAttackPackets[0].payload);
+    assert(fallbackAttack.has_value());
+    assert(fallbackAttack->requestId == attack.requestId);
+    assert(fallbackAttack->entityId == attack.entityId);
+
+    ClockSnapshotMessage fallbackClock{};
+    fallbackClock.scope = { 100, 0 };
+    fallbackClock.dayTime = 0x4000;
+    assert(host.Send(MessageType::ClockSnapshot, EncodeClockSnapshot(fallbackClock)));
+    const std::vector<Packet> fallbackPackets = WaitForPackets(guest, std::chrono::seconds(2));
+    assert(fallbackPackets.size() == 1);
+    assert(fallbackPackets[0].type == MessageType::ClockSnapshot);
+    const auto receivedFallbackClock = DecodeClockSnapshot(fallbackPackets[0].payload);
+    assert(receivedFallbackClock.has_value());
+    assert(receivedFallbackClock->dayTime == fallbackClock.dayTime);
 
     guest.Stop();
     assert(WaitForState(host, TransportState::Listening, std::chrono::seconds(2)));
@@ -155,6 +248,9 @@ int main() {
 
     reconnectedGuest.Stop();
     host.Stop();
+    SDL_setenv("HYRULE_COOP_TEST_UDP_DROP_EVERY", "0", 1);
+    SDL_setenv("HYRULE_COOP_TEST_UDP_DELAY_MS", "0", 1);
+    SDL_setenv("HYRULE_COOP_TEST_UDP_REORDER_PAIRS", "0", 1);
     SDLNet_Quit();
     SDL_Quit();
     std::cout << "HyruleCoop direct session tests passed\n";

@@ -15,6 +15,7 @@ inline constexpr const char* Coordination = "core.coordination.v1";
 inline constexpr const char* RequestLedger = "core.requestLedger.v1";
 inline constexpr const char* OotClock = "oot.clock.v1";
 inline constexpr const char* OotPlayer = "oot.player.v1";
+inline constexpr const char* OotPlayerPresentation = "oot.player.presentation.v1";
 inline constexpr const char* OotSceneFlags = "oot.sceneFlags.v1";
 inline constexpr const char* OotDekuBaba = "oot.actor.dekuBaba.v1";
 inline constexpr const char* OotGuestAttack = "oot.combat.guestIntent.v1";

@@ -38,6 +38,7 @@ class Manager {
     bool IsReady() const;
     bool IsPreparingRemotePlayer() const;
     const PlayerSnapshotMessage* GetRemotePlayerSnapshot() const;
+    const std::string& GetRemotePlayerName() const;
     void SanitizeSaveCopy(void* saveContext) const;
     void PrepareRemotePlayer(void* actor);
     void NotifyRemotePlayerDestroyed(void* actor);
@@ -53,6 +54,7 @@ class Manager {
     void HandleHelloAck(const Packet& packet);
     void HandleClockSnapshot(const Packet& packet);
     void HandlePlayerSnapshot(const Packet& packet);
+    void HandlePlayerPresentation(const Packet& packet);
     void HandleSnapshotRequest(const Packet& packet);
     void HandleSceneFlagIntent(const Packet& packet);
     void HandleSceneFlagsSnapshot(const Packet& packet);
@@ -67,12 +69,14 @@ class Manager {
     void SendHelloAck(bool accepted, const std::string& reason);
     void SendClockSnapshot();
     void SendPlayerSnapshot();
+    void SendPlayerPresentation();
     void SendSnapshotRequest();
     void SendSceneFlagIntent(int16_t scene, int16_t flagType, int16_t flag, bool set);
     void SendSceneFlagsSnapshot(int16_t scene);
     void SendBarrierSnapshot();
     void SendBarrierReady();
     void SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackKind);
+    void ClearPendingGuestAttack(uint64_t entityId);
     void SendCollectibleIntent(int16_t scene, int16_t flagType, int16_t flag);
     void SendProgressionSnapshot();
     void SendProgressionItemIntent(uint16_t itemId, uint16_t modIndex, uint16_t mapIndex);
@@ -111,6 +115,7 @@ class Manager {
     DirectSession transport;
     ConnectionPhase phase = ConnectionPhase::Idle;
     std::string playerName;
+    std::string remotePlayerName;
     std::string protocolError;
     bool helloSent = false;
     bool handshakeComplete = false;
@@ -126,6 +131,9 @@ class Manager {
     uint64_t guestTokenLow = 0;
     CapabilityList negotiatedCapabilities;
     std::optional<PlayerSnapshotMessage> remotePlayerSnapshot;
+    std::optional<PlayerPresentationMessage> remotePlayerPresentation;
+    std::optional<PlayerPresentationMessage> lastSentPlayerPresentation;
+    uint32_t nextPlayerPresentationRevision = 1;
     uint32_t lastRemoteMeleeTick = 0;
     int16_t lastRemoteMeleeScene = -1;
     void* remotePlayer = nullptr;
@@ -153,6 +161,7 @@ class Manager {
     SharedProgressionState canonicalProgression;
     bool canonicalProgressionCaptured = false;
     std::unordered_set<uint64_t> pendingGuestAttacks;
+    std::unordered_map<uint64_t, uint64_t> pendingGuestAttackRequests;
     std::unordered_map<uint64_t, uint32_t> lastGuestAttackTick;
     std::unordered_map<uint64_t, void*> localDekuBabas;
     std::unordered_map<uint64_t, void*> localGohmas;

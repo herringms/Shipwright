@@ -12,7 +12,8 @@ The current proof implements the complete first vertical path for two Ocarina of
 1. Negotiate an exact game/build and namespaced capability manifest.
 2. Assign a stable participant identity and reconnect token within a host-generated session epoch.
 3. Coordinate scene entry through a host-owned prepare/ready/commit/active/complete barrier.
-4. Render the remote player and one host-owned Deku Baba.
+4. Render the named remote player, including reliable equipment and worn-mask presentation, and one host-owned Deku
+   Baba.
 5. Convert a guest hit into an idempotent attack intent validated by the host for session, scene, entity, and range.
 6. Commit Deku Baba damage and death on the host and publish the canonical actor snapshot.
 7. Convert one durable collectible flag into a location-keyed, idempotent host commit.
@@ -33,7 +34,8 @@ An engine-independent architectural test executes that entire sequence, includin
 - Request identity is `(sessionEpoch, worldGeneration, participantId, requestId)`.
 - Scene flags, progression, and actors have independent revisions or keyed streams.
 - Coordinated transitions use a barrier operation epoch and an explicit target scene, optional room, and entrance.
-- TCP remains transport only. Ordered bytes do not replace authority, idempotency, or readiness.
+- TCP is the reliable control and durability lane. Authenticated UDP carries replaceable realtime snapshots and
+  bounded, idempotent attack-intent retries. Transport ordering does not replace authority, idempotency, or readiness.
 
 ## Session save overlay
 
@@ -49,9 +51,11 @@ button/equipment choices remain player-owned.
 
 ## Protocol
 
-`DirectSession` is a persistent one-host/one-guest framed TCP transport. It supports keyed replacement of realtime
-snapshots, malformed-peer rejection, explicit rejection delivery, and reconnecting a replacement guest without
-destroying canonical host state.
+`DirectSession` is a persistent one-host/one-guest hybrid transport. Framed TCP carries reliable control and durable
+state. Authenticated UDP on the same numeric port carries high-frequency player, clock, and actor snapshots plus
+bounded attack-intent retries, with TCP fallback when realtime delivery is unavailable. It supports keyed replacement,
+freshness rejection, malformed-peer rejection, explicit rejection delivery, and reconnecting a replacement guest
+without destroying canonical host state.
 
 The shared OoT/MM protocol includes:
 
@@ -84,15 +88,17 @@ the full architectural proof, entity identity, malformed peers, rejection delive
 Both game managers pass standalone syntax checks against their port headers.
 
 The OoT branch produces a complete MinGW Windows application. An environment-gated localhost harness boots two
-isolated save copies, connects them over TCP, coordinates two scene transitions, renders both Links, kills a host-owned
-Deku Baba from guest attack intents, commits a durable collectible, shares a guest-originated Hookshot and Kokiri
-Sword without sharing rupees or arrows, defeats host-owned Gohma from two guest attacks, and reconnects a deliberately
-stale guest. Both instances verify canonical reconstruction and report `PASS`. The harness is dormant unless
-`HYRULE_COOP_TEST_ROLE` is explicitly set.
+isolated save copies, connects them over TCP and UDP, coordinates two scene transitions, renders both Links, kills a
+host-owned Deku Baba from physical guest collisions, commits a durable collectible, shares guest-originated
+progression without sharing local resources, defeats host-owned Gohma from two physical guest attacks, and reconnects
+a deliberately stale guest. The same proof can deterministically inject recurring UDP loss, bounded data delay, and
+pair reordering. The commit gate repeats the full proof while dropping every fifth UDP data packet, delaying surviving
+packets by 25 ms, and reversing each surviving packet pair. Both instances verify canonical reconstruction and report
+`PASS`. The harness is dormant unless `HYRULE_COOP_TEST_ROLE` is explicitly set.
 
-The verified host and client executables have identical SHA-256 hashes and negotiate the explicit
-`hyrule-coop-poc.2` compatibility ID with protocol version 3 in addition to Shipwright's upstream commit. The verified
-Windows executable SHA-256 is `362364A1216A21AC432B51CEC42DA2F9822DC985006CE369D4BEA9672E3F971B`.
+Verified host and client executables must have identical generated fingerprints and negotiate the explicit
+`hyrule-coop-poc.3` compatibility ID with protocol version 5 in addition to Shipwright's upstream commit. Release
+tooling records the exact executable and package hashes for each published build.
 The PoC build pins its own OneDrive directory for offline availability instead of rejecting the path by name. No
 installed Ship of Harkinian or 2Ship files are modified by this branch.
 
@@ -107,10 +113,9 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - Carried world actors and their player attachments, including canonical shared pots and participant-local traversal
   Cuccos whose remote carry proxies do not replace either player's interactive Cucco
 - Complete Deku Baba hit reactions, temporary pruning, drops, and regrowth beyond the synthetic permanent-death proof
-- Remote presentation of currently worn masks independently from shared ownership of those masks
 - Host-owned durable world-event flags, beginning with `EVENTCHKINF_OPENED_ZORAS_DOMAIN`, with immediate loaded-actor
   reconciliation and reconnect replay
-- Enabled-by-default remote player name tags and same-scene minimap markers using existing Shipwright rendering hooks
+- Same-scene minimap markers using existing Shipwright rendering hooks
 - Host-committed shared recovery and ammunition pickup effects while current health and ammunition balances remain
   participant-local
 - One-time finder notifications for unique durable pickups, without replay during snapshot or reconnect reconciliation

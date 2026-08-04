@@ -65,10 +65,12 @@ static void TestClockAndAckMessages() {
     assert(decodedClock->night);
 
     HelloAckMessage rejection;
+    rejection.playerName = "Host Link";
     rejection.reason = "different builds";
     const auto decodedAck = DecodeHelloAck(EncodeHelloAck(rejection));
     assert(decodedAck.has_value());
     assert(!decodedAck->accepted);
+    assert(decodedAck->playerName == "Host Link");
     assert(decodedAck->reason == "different builds");
 }
 
@@ -89,6 +91,7 @@ static void TestPlayerSnapshot() {
     player.movementFlags = 5;
     player.upperLimbRotation[0] = 321;
     player.boots = -1;
+    player.currentMask = 4;
     player.stateFlags1 = 0xDEADBEEF;
     player.buttonItem = 7;
     player.itemAction = -4;
@@ -111,6 +114,7 @@ static void TestPlayerSnapshot() {
     assert(decoded->rotation[1] == player.rotation[1]);
     assert(decoded->joints[17] == player.joints[17]);
     assert(decoded->boots == player.boots);
+    assert(decoded->currentMask == player.currentMask);
     assert(decoded->stateFlags1 == player.stateFlags1);
     assert(decoded->itemAction == player.itemAction);
     assert(decoded->modelBlend == player.modelBlend);
@@ -123,6 +127,37 @@ static void TestPlayerSnapshot() {
     std::vector<uint8_t> truncated = EncodePlayerSnapshot(player);
     truncated.pop_back();
     assert(!DecodePlayerSnapshot(truncated).has_value());
+}
+
+static void TestPlayerPresentation() {
+    PlayerPresentationMessage presentation;
+    presentation.scope = { 90, 2 };
+    presentation.revision = 8;
+    presentation.boots = 2;
+    presentation.shield = 3;
+    presentation.tunic = 1;
+    presentation.currentMask = 4;
+    presentation.buttonItem = 5;
+    presentation.itemAction = -7;
+    presentation.heldItemAction = 9;
+    presentation.modelGroup = 6;
+
+    const auto decoded = DecodePlayerPresentation(EncodePlayerPresentation(presentation));
+    assert(decoded.has_value());
+    assert(decoded->scope == presentation.scope);
+    assert(decoded->revision == presentation.revision);
+    assert(decoded->boots == presentation.boots);
+    assert(decoded->shield == presentation.shield);
+    assert(decoded->tunic == presentation.tunic);
+    assert(decoded->currentMask == presentation.currentMask);
+    assert(decoded->buttonItem == presentation.buttonItem);
+    assert(decoded->itemAction == presentation.itemAction);
+    assert(decoded->heldItemAction == presentation.heldItemAction);
+    assert(decoded->modelGroup == presentation.modelGroup);
+
+    std::vector<uint8_t> truncated = EncodePlayerPresentation(presentation);
+    truncated.pop_back();
+    assert(!DecodePlayerPresentation(truncated).has_value());
 }
 
 static void TestCycleSnapshot() {
@@ -173,6 +208,7 @@ static void TestActorSnapshot() {
     actor.scope = { 90, 4 };
     actor.hostTick = 123;
     actor.entityId = 0x8877665544332211ULL;
+    actor.acknowledgedRequestId = 0x123456789ABCDEF0ULL;
     actor.scene = 6;
     actor.room = -1;
     actor.actorId = 0x55;
@@ -198,6 +234,7 @@ static void TestActorSnapshot() {
     const auto decoded = DecodeActorSnapshot(EncodeActorSnapshot(actor));
     assert(decoded.has_value());
     assert(decoded->entityId == actor.entityId);
+    assert(decoded->acknowledgedRequestId == actor.acknowledgedRequestId);
     assert(decoded->room == -1);
     assert(decoded->params == -7);
     assert(decoded->homePosition[1] == -20.5f);
@@ -334,6 +371,7 @@ int main() {
     TestFragmentedPacket();
     TestClockAndAckMessages();
     TestPlayerSnapshot();
+    TestPlayerPresentation();
     TestCycleSnapshot();
     TestWorldStateMessages();
     TestActorSnapshot();

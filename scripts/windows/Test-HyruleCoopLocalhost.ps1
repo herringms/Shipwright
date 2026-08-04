@@ -3,6 +3,9 @@ param(
     [string]$SeedSavePath,
     [int]$Port = 43493,
     [int]$TimeoutSeconds = 120,
+    [int]$UdpDropEvery = 0,
+    [int]$UdpDelayMs = 0,
+    [switch]$UdpReorderPairs,
     [switch]$ExpectBuildMismatch
 )
 
@@ -14,6 +17,9 @@ if ([string]::IsNullOrWhiteSpace($ExecutablePath)) {
 }
 if ([string]::IsNullOrWhiteSpace($SeedSavePath)) {
     $SeedSavePath = Join-Path $repoRoot "dist\Hyrule-Coop-PoC-2-Windows\Save\file1.sav"
+}
+if ($UdpDropEvery -lt 0 -or $UdpDelayMs -lt 0 -or $UdpDelayMs -gt 1000) {
+    throw "UDP impairment values must be non-negative and delay must not exceed 1000 ms."
 }
 
 $ExecutablePath = [IO.Path]::GetFullPath($ExecutablePath)
@@ -59,7 +65,8 @@ if ($ExpectBuildMismatch) {
 $savedEnvironment = @{}
 foreach ($name in @("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "HYRULE_COOP_TEST_PORT",
                      "HYRULE_COOP_TEST_REPORT", "HYRULE_COOP_TEST_ROLE", "HYRULE_COOP_TEST_ADDRESS",
-                     "HYRULE_COOP_SAVE_DIR")) {
+                     "HYRULE_COOP_SAVE_DIR", "HYRULE_COOP_TEST_UDP_DROP_EVERY",
+                     "HYRULE_COOP_TEST_UDP_DELAY_MS", "HYRULE_COOP_TEST_UDP_REORDER_PAIRS")) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 
@@ -71,6 +78,9 @@ try {
     $env:SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS = "0"
     $env:HYRULE_COOP_TEST_PORT = $Port.ToString()
     $env:HYRULE_COOP_TEST_ADDRESS = "127.0.0.1"
+    $env:HYRULE_COOP_TEST_UDP_DROP_EVERY = $UdpDropEvery.ToString()
+    $env:HYRULE_COOP_TEST_UDP_DELAY_MS = $UdpDelayMs.ToString()
+    $env:HYRULE_COOP_TEST_UDP_REORDER_PAIRS = if ($UdpReorderPairs.IsPresent) { "1" } else { "0" }
     $env:HYRULE_COOP_TEST_REPORT = $hostReport
     $env:HYRULE_COOP_TEST_ROLE = "host"
     $env:HYRULE_COOP_SAVE_DIR = (Join-Path $hostDir "Save")
@@ -199,3 +209,6 @@ foreach ($pattern in $requiredClientEvidence) {
 
 Write-Host "Hyrule Co-op localhost proof: PASS"
 Write-Host "Exact build fingerprint: $hostBuild"
+if ($UdpDropEvery -ne 0 -or $UdpDelayMs -ne 0 -or $UdpReorderPairs) {
+    Write-Host "UDP impairment: drop every $UdpDropEvery, delay $UdpDelayMs ms, reorder pairs $($UdpReorderPairs.IsPresent)"
+}

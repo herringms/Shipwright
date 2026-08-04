@@ -1,6 +1,7 @@
 #include "RemotePlayer.h"
 
 #include "HyruleCoop.h"
+#include "soh/Enhancements/nametag.h"
 
 extern "C" {
 #include "functions.h"
@@ -55,6 +56,14 @@ extern "C" void HyruleCoopRemotePlayer_Init(Actor* actor, PlayState* play) {
     actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
     actor->shape.shadowAlpha = 255;
     gSaveContext.linkAge = originalAge;
+
+    const std::string& remoteName = HyruleCoop::Manager::Instance->GetRemotePlayerName();
+    if (!remoteName.empty()) {
+        NameTagOptions options{};
+        options.tag = "hyrule-coop-player";
+        options.yOffset = 24;
+        NameTag_RegisterForActorWithOptions(actor, remoteName.c_str(), options);
+    }
 }
 
 extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
@@ -80,6 +89,7 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
     player->currentBoots = state->boots;
     player->currentShield = state->shield;
     player->currentTunic = state->tunic;
+    player->currentMask = state->currentMask;
     player->stateFlags1 = state->stateFlags1;
     player->stateFlags2 = state->stateFlags2;
     player->itemAction = state->itemAction;

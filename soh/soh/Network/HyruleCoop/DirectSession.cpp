@@ -1,8 +1,11 @@
 #include "DirectSession.h"
 
 #include <SDL2/SDL.h>
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
 #include <spdlog/spdlog.h>
 
 namespace HyruleCoop {
@@ -12,6 +15,104 @@ bool IsReplaceableSnapshot(MessageType type) {
     return type == MessageType::ClockSnapshot || type == MessageType::PlayerSnapshot ||
            type == MessageType::SceneFlagsSnapshot || type == MessageType::ActorSnapshot ||
            type == MessageType::CycleSnapshot || type == MessageType::ProgressionSnapshot;
+}
+
+bool IsRealtimeSnapshot(MessageType type) {
+    return type == MessageType::ClockSnapshot || type == MessageType::PlayerSnapshot ||
+           type == MessageType::ActorSnapshot;
+}
+
+bool IsRealtimeDatagram(MessageType type) {
+    return IsRealtimeSnapshot(type) || type == MessageType::AttackIntent;
+}
+
+constexpr uint32_t kRealtimeMagic = 0x48435544; // HCUD
+constexpr uint16_t kRealtimeVersion = 1;
+constexpr uint16_t kRealtimeBind = 1;
+constexpr uint16_t kRealtimeBindAck = 2;
+constexpr uint16_t kRealtimeData = 3;
+constexpr size_t kRealtimeHeaderSize = 44;
+constexpr size_t kMaximumRealtimeDatagramSize = 1200;
+constexpr uint64_t kRealtimeBindIntervalMs = 500;
+constexpr uint64_t kRealtimeTimeoutMs = 5000;
+
+void AppendU16(std::vector<uint8_t>& data, uint16_t value) {
+    data.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    data.push_back(static_cast<uint8_t>(value & 0xFF));
+}
+
+void AppendU32(std::vector<uint8_t>& data, uint32_t value) {
+    data.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+    data.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+    data.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    data.push_back(static_cast<uint8_t>(value & 0xFF));
+}
+
+void AppendU64(std::vector<uint8_t>& data, uint64_t value) {
+    AppendU32(data, static_cast<uint32_t>(value >> 32));
+    AppendU32(data, static_cast<uint32_t>(value));
+}
+
+uint16_t ReadU16(const uint8_t* data) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(data[0]) << 8) | data[1]);
+}
+
+uint32_t ReadU32(const uint8_t* data) {
+    return (static_cast<uint32_t>(data[0]) << 24) | (static_cast<uint32_t>(data[1]) << 16) |
+           (static_cast<uint32_t>(data[2]) << 8) | static_cast<uint32_t>(data[3]);
+}
+
+uint64_t ReadU64(const uint8_t* data) {
+    return (static_cast<uint64_t>(ReadU32(data)) << 32) | ReadU32(data + 4);
+}
+
+std::vector<uint8_t> EncodeRealtimeDatagram(uint16_t kind, SessionScope scope, uint64_t participantId,
+                                            uint64_t tokenHigh, uint64_t tokenLow,
+                                            const std::vector<uint8_t>& payload = {}) {
+    std::vector<uint8_t> data;
+    data.reserve(kRealtimeHeaderSize + payload.size());
+    AppendU32(data, kRealtimeMagic);
+    AppendU16(data, kRealtimeVersion);
+    AppendU16(data, kind);
+    AppendU64(data, scope.sessionEpoch);
+    AppendU32(data, scope.worldGeneration);
+    AppendU64(data, participantId);
+    AppendU64(data, tokenHigh);
+    AppendU64(data, tokenLow);
+    data.insert(data.end(), payload.begin(), payload.end());
+    return data;
+}
+
+bool SameCredentials(const uint8_t* data, size_t size, SessionScope scope, uint64_t participantId,
+                     uint64_t tokenHigh, uint64_t tokenLow, uint16_t& kind) {
+    if (size < kRealtimeHeaderSize || ReadU32(data) != kRealtimeMagic || ReadU16(data + 4) != kRealtimeVersion) {
+        return false;
+    }
+    kind = ReadU16(data + 6);
+    return ReadU64(data + 8) == scope.sessionEpoch && ReadU32(data + 16) == scope.worldGeneration &&
+           ReadU64(data + 20) == participantId && ReadU64(data + 28) == tokenHigh &&
+           ReadU64(data + 36) == tokenLow;
+}
+
+uint64_t FreshnessStream(MessageType type, uint64_t streamId) {
+    return type == MessageType::PlayerSnapshot || type == MessageType::ClockSnapshot ? 0 : streamId;
+}
+
+bool IsNewerSequence(uint32_t sequence, uint32_t previous) {
+    return static_cast<int32_t>(sequence - previous) > 0;
+}
+
+uint32_t ReadTestEnvironmentU32(const char* name, uint32_t maximum) {
+    const char* text = SDL_getenv(name);
+    if (text == nullptr || text[0] == '\0') {
+        return 0;
+    }
+    char* end = nullptr;
+    const unsigned long value = std::strtoul(text, &end, 10);
+    if (end == text || *end != '\0') {
+        return 0;
+    }
+    return static_cast<uint32_t>(std::min<unsigned long>(value, maximum));
 }
 
 } // namespace
@@ -58,12 +159,28 @@ void DirectSession::Stop() {
         std::lock_guard<std::mutex> lock(outgoingMutex);
         outgoing.clear();
     }
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        realtimeCredentials = {};
+        realtimeOutgoing.clear();
+        repeatedRealtimeOutgoing.clear();
+        latestRealtimeSequences.clear();
+        lastRealtimeReceiveMs = 0;
+        lastRealtimeBindAttemptMs = 0;
+    }
+    {
+        std::lock_guard<std::mutex> lock(realtimeTestMutex);
+        realtimeTestDatagramCount = 0;
+        realtimeTestHeldDatagram.clear();
+    }
 
     role = SessionRole::None;
     state = TransportState::Stopped;
     nextSequence = 1;
     connectionGeneration = 0;
     disconnectPeerRequested = false;
+    realtimeConfigured = false;
+    realtimeReady = false;
 }
 
 void DirectSession::DisconnectPeer() {
@@ -72,12 +189,98 @@ void DirectSession::DisconnectPeer() {
     }
 }
 
+void DirectSession::ConfigureRealtime(SessionScope scope, uint64_t participantId, uint64_t tokenHigh,
+                                      uint64_t tokenLow) {
+    realtimeConfigured = false;
+    realtimeReady = false;
+    FallBackRealtimePackets();
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        realtimeCredentials = { scope, participantId, tokenHigh, tokenLow };
+        latestRealtimeSequences.clear();
+        lastRealtimeReceiveMs = 0;
+        lastRealtimeBindAttemptMs = 0;
+    }
+    realtimeConfigured = scope.sessionEpoch != 0 && participantId != 0 && (tokenHigh != 0 || tokenLow != 0);
+}
+
+void DirectSession::DisableRealtime() {
+    realtimeConfigured = false;
+    realtimeReady = false;
+    FallBackRealtimePackets();
+    std::lock_guard<std::mutex> lock(realtimeMutex);
+    realtimeCredentials = {};
+    latestRealtimeSequences.clear();
+    lastRealtimeReceiveMs = 0;
+    lastRealtimeBindAttemptMs = 0;
+}
+
 bool DirectSession::Send(MessageType type, const std::vector<uint8_t>& payload, uint64_t streamId) {
     if (!running || state != TransportState::Connected || payload.size() > kMaximumPayloadSize) {
         return false;
     }
     Packet packet{ type, nextSequence.fetch_add(1), payload, streamId };
+    std::vector<uint8_t> bytes = EncodePacket(packet);
+    if (IsRealtimeSnapshot(type) && realtimeReady && bytes.size() + kRealtimeHeaderSize <= kMaximumRealtimeDatagramSize) {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        if (realtimeReady) {
+            const uint64_t sequenceStream = streamId;
+            for (auto iterator = realtimeOutgoing.begin(); iterator != realtimeOutgoing.end(); ++iterator) {
+                if (iterator->type == type && iterator->streamId == sequenceStream) {
+                    realtimeOutgoing.erase(iterator);
+                    break;
+                }
+            }
+            realtimeOutgoing.push_back({ type, streamId, std::move(bytes) });
+            return true;
+        }
+    }
+
+    QueueReliable({ type, streamId, std::move(bytes) });
+    return true;
+}
+
+bool DirectSession::SendReliable(MessageType type, const std::vector<uint8_t>& payload, uint64_t streamId) {
+    if (!running || state != TransportState::Connected || payload.size() > kMaximumPayloadSize) {
+        return false;
+    }
+    Packet packet{ type, nextSequence.fetch_add(1), payload, streamId };
+    QueueReliable({ type, streamId, EncodePacket(packet) });
+    return true;
+}
+
+bool DirectSession::SendRepeatedRealtime(MessageType type, const std::vector<uint8_t>& payload, uint64_t streamId,
+                                         uint32_t repeatIntervalMs, uint32_t repeatWindowMs) {
+    if (!running || state != TransportState::Connected || payload.size() > kMaximumPayloadSize ||
+        !IsRealtimeDatagram(type) || repeatIntervalMs == 0 || repeatWindowMs < repeatIntervalMs) {
+        return false;
+    }
+    Packet packet{ type, nextSequence.fetch_add(1), payload, streamId };
+    OutgoingPacket outgoingPacket{ type, streamId, EncodePacket(packet) };
+    if (realtimeReady && outgoingPacket.bytes.size() + kRealtimeHeaderSize <= kMaximumRealtimeDatagramSize) {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        if (realtimeReady) {
+            const uint64_t now = SDL_GetTicks64();
+            repeatedRealtimeOutgoing[std::make_pair(type, streamId)] = {
+                std::move(outgoingPacket), now, now + repeatWindowMs, repeatIntervalMs
+            };
+            return true;
+        }
+    }
+
+    QueueReliable(std::move(outgoingPacket));
+    return true;
+}
+
+void DirectSession::CancelRepeatedRealtime(MessageType type, uint64_t streamId) {
+    std::lock_guard<std::mutex> lock(realtimeMutex);
+    repeatedRealtimeOutgoing.erase(std::make_pair(type, streamId));
+}
+
+void DirectSession::QueueReliable(OutgoingPacket packet) {
     std::lock_guard<std::mutex> lock(outgoingMutex);
+    const MessageType type = packet.type;
+    const uint64_t streamId = packet.streamId;
     if (IsReplaceableSnapshot(type)) {
         for (auto iterator = outgoing.begin(); iterator != outgoing.end(); ++iterator) {
             if (iterator->type == type && iterator->streamId == streamId) {
@@ -87,8 +290,7 @@ bool DirectSession::Send(MessageType type, const std::vector<uint8_t>& payload, 
             }
         }
     }
-    outgoing.push_back({ type, streamId, EncodePacket(packet) });
-    return true;
+    outgoing.push_back(std::move(packet));
 }
 
 std::vector<Packet> DirectSession::TakeIncomingPackets() {
@@ -114,6 +316,10 @@ uint32_t DirectSession::GetConnectionGeneration() const {
     return connectionGeneration;
 }
 
+bool DirectSession::IsRealtimeReady() const {
+    return realtimeReady;
+}
+
 std::string DirectSession::GetLastError() const {
     std::lock_guard<std::mutex> lock(errorMutex);
     return lastError;
@@ -132,7 +338,13 @@ void DirectSession::RunHost(uint16_t port) {
         return;
     }
 
-    SPDLOG_INFO("[HyruleCoop] Listening on TCP port {}", port);
+    UDPsocket realtimeSocket = SDLNet_UDP_Open(port);
+    if (realtimeSocket == nullptr) {
+        SPDLOG_WARN("[HyruleCoop] UDP port {} is unavailable; realtime snapshots will use TCP: {}", port,
+                    SDLNet_GetError());
+    }
+
+    SPDLOG_INFO("[HyruleCoop] Listening on TCP{} port {}", realtimeSocket == nullptr ? "" : "+UDP", port);
     while (running) {
         state = TransportState::Listening;
         TCPsocket peer = nullptr;
@@ -145,12 +357,15 @@ void DirectSession::RunHost(uint16_t port) {
         if (peer == nullptr) {
             break;
         }
-        RunConnectedSocket(peer);
+        RunConnectedSocket(peer, realtimeSocket, nullptr);
         SDLNet_TCP_Close(peer);
         ClearPacketQueues();
         if (state == TransportState::Error) {
             break;
         }
+    }
+    if (realtimeSocket != nullptr) {
+        SDLNet_UDP_Close(realtimeSocket);
     }
     SDLNet_TCP_Close(listener);
 }
@@ -169,11 +384,20 @@ void DirectSession::RunClient(std::string host, uint16_t port) {
         return;
     }
 
-    RunConnectedSocket(peer);
+    UDPsocket realtimeSocket = SDLNet_UDP_Open(0);
+    if (realtimeSocket == nullptr) {
+        SPDLOG_WARN("[HyruleCoop] UDP socket is unavailable; realtime snapshots will use TCP: {}", SDLNet_GetError());
+    }
+
+    RunConnectedSocket(peer, realtimeSocket, &address);
+    if (realtimeSocket != nullptr) {
+        SDLNet_UDP_Close(realtimeSocket);
+    }
     SDLNet_TCP_Close(peer);
 }
 
-void DirectSession::RunConnectedSocket(TCPsocket socket) {
+void DirectSession::RunConnectedSocket(TCPsocket socket, UDPsocket realtimeSocket,
+                                       const IPaddress* defaultRealtimePeer) {
     SDLNet_SocketSet socketSet = SDLNet_AllocSocketSet(1);
     if (socketSet == nullptr || SDLNet_TCP_AddSocket(socketSet, socket) < 0) {
         if (socketSet != nullptr) {
@@ -184,10 +408,25 @@ void DirectSession::RunConnectedSocket(TCPsocket socket) {
     }
 
     disconnectPeerRequested = false;
+    DisableRealtime();
+    ConfigureRealtimeTestImpairmentFromEnvironment();
     connectionGeneration.fetch_add(1);
     state = TransportState::Connected;
     std::vector<uint8_t> receiveBuffer;
+    IPaddress realtimePeer{};
+    bool hasRealtimePeer = defaultRealtimePeer != nullptr;
+    if (defaultRealtimePeer != nullptr) {
+        realtimePeer = *defaultRealtimePeer;
+    }
     while (running) {
+        if (realtimeSocket != nullptr) {
+            MaintainRealtimeBinding(realtimeSocket, realtimePeer, hasRealtimePeer);
+            ReceiveRealtime(realtimeSocket, realtimePeer, hasRealtimePeer);
+            if (realtimeReady && hasRealtimePeer && !FlushRealtime(realtimeSocket, realtimePeer)) {
+                realtimeReady = false;
+                FallBackRealtimePackets();
+            }
+        }
         if (!FlushOutgoing(socket)) {
             break;
         }
@@ -200,6 +439,7 @@ void DirectSession::RunConnectedSocket(TCPsocket socket) {
         SDL_Delay(1);
     }
 
+    DisableRealtime();
     SDLNet_FreeSocketSet(socketSet);
     if (running && state != TransportState::Error) {
         state = TransportState::Disconnected;
@@ -220,6 +460,214 @@ bool DirectSession::FlushOutgoing(TCPsocket socket) {
         packets.pop_front();
     }
     return true;
+}
+
+bool DirectSession::FlushRealtime(UDPsocket socket, const IPaddress& peerAddress) {
+    std::deque<OutgoingPacket> packets;
+    std::deque<OutgoingPacket> reliableFallbacks;
+    RealtimeCredentials credentials;
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        packets.swap(realtimeOutgoing);
+        const uint64_t now = SDL_GetTicks64();
+        for (auto iterator = repeatedRealtimeOutgoing.begin(); iterator != repeatedRealtimeOutgoing.end();) {
+            RepeatedRealtimePacket& repeated = iterator->second;
+            if (now >= repeated.expiresAtMs) {
+                reliableFallbacks.push_back(std::move(repeated.packet));
+                iterator = repeatedRealtimeOutgoing.erase(iterator);
+                continue;
+            }
+            if (now >= repeated.nextSendMs) {
+                packets.push_back(repeated.packet);
+                repeated.nextSendMs = now + repeated.repeatIntervalMs;
+            }
+            ++iterator;
+        }
+        credentials = realtimeCredentials;
+    }
+    while (!reliableFallbacks.empty()) {
+        QueueReliable(std::move(reliableFallbacks.front()));
+        reliableFallbacks.pop_front();
+    }
+
+    while (!packets.empty()) {
+        std::vector<uint8_t> data =
+            EncodeRealtimeDatagram(kRealtimeData, credentials.scope, credentials.participantId,
+                                   credentials.tokenHigh, credentials.tokenLow, packets.front().bytes);
+        if (!SendRealtimeData(socket, peerAddress, data)) {
+            std::lock_guard<std::mutex> lock(outgoingMutex);
+            while (!packets.empty()) {
+                if (packets.front().type != MessageType::AttackIntent) {
+                    outgoing.push_back(std::move(packets.front()));
+                }
+                packets.pop_front();
+            }
+            SPDLOG_WARN("[HyruleCoop] UDP realtime send failed; returning to TCP: {}", SDLNet_GetError());
+            return false;
+        }
+        packets.pop_front();
+    }
+    return true;
+}
+
+bool DirectSession::SendRealtimeData(UDPsocket socket, const IPaddress& peerAddress,
+                                     const std::vector<uint8_t>& data) {
+    uint32_t delayMs = 0;
+    std::vector<uint8_t> heldDatagram;
+    {
+        std::lock_guard<std::mutex> lock(realtimeTestMutex);
+        ++realtimeTestDatagramCount;
+        if (realtimeTestDropEvery != 0 && realtimeTestDatagramCount % realtimeTestDropEvery == 0) {
+            return true;
+        }
+        delayMs = realtimeTestDelayMs;
+        if (realtimeTestReorderPairs) {
+            if (realtimeTestHeldDatagram.empty()) {
+                realtimeTestHeldDatagram = data;
+                return true;
+            }
+            heldDatagram.swap(realtimeTestHeldDatagram);
+        }
+    }
+
+    if (delayMs != 0) {
+        SDL_Delay(delayMs);
+    }
+    const auto send = [&](const std::vector<uint8_t>& bytes) {
+        UDPpacket packet{};
+        packet.data = const_cast<uint8_t*>(bytes.data());
+        packet.len = static_cast<int>(bytes.size());
+        packet.maxlen = packet.len;
+        packet.address = peerAddress;
+        return SDLNet_UDP_Send(socket, -1, &packet) != 0;
+    };
+    return send(data) && (heldDatagram.empty() || send(heldDatagram));
+}
+
+void DirectSession::ConfigureRealtimeTestImpairmentFromEnvironment() {
+    const uint32_t dropEvery = ReadTestEnvironmentU32("HYRULE_COOP_TEST_UDP_DROP_EVERY", 1000000);
+    const uint32_t delayMs = ReadTestEnvironmentU32("HYRULE_COOP_TEST_UDP_DELAY_MS", 1000);
+    const bool reorderPairs = ReadTestEnvironmentU32("HYRULE_COOP_TEST_UDP_REORDER_PAIRS", 1) != 0;
+    {
+        std::lock_guard<std::mutex> lock(realtimeTestMutex);
+        realtimeTestDropEvery = dropEvery;
+        realtimeTestDatagramCount = 0;
+        realtimeTestDelayMs = delayMs;
+        realtimeTestReorderPairs = reorderPairs;
+        realtimeTestHeldDatagram.clear();
+    }
+    if (dropEvery != 0 || delayMs != 0 || reorderPairs) {
+        SPDLOG_WARN("[HyruleCoop] Test-only UDP impairment enabled: dropEvery={}, delayMs={}, reorderPairs={}",
+                    dropEvery, delayMs, reorderPairs);
+    }
+}
+
+void DirectSession::MaintainRealtimeBinding(UDPsocket socket, IPaddress& peerAddress, bool& hasPeerAddress) {
+    if (!realtimeConfigured) {
+        return;
+    }
+
+    const uint64_t now = SDL_GetTicks64();
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        if (realtimeReady && lastRealtimeReceiveMs != 0 && now - lastRealtimeReceiveMs > kRealtimeTimeoutMs) {
+            realtimeReady = false;
+        }
+    }
+    if (!realtimeReady) {
+        FallBackRealtimePackets();
+    }
+
+    if (role != SessionRole::Client || !hasPeerAddress) {
+        return;
+    }
+
+    bool sendBind = false;
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        if (lastRealtimeBindAttemptMs == 0 || now - lastRealtimeBindAttemptMs >= kRealtimeBindIntervalMs) {
+            lastRealtimeBindAttemptMs = now;
+            sendBind = true;
+        }
+    }
+    if (sendBind) {
+        SendRealtimeControl(socket, peerAddress, kRealtimeBind);
+    }
+}
+
+bool DirectSession::SendRealtimeControl(UDPsocket socket, const IPaddress& peerAddress, uint16_t kind) {
+    RealtimeCredentials credentials;
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        credentials = realtimeCredentials;
+    }
+    std::vector<uint8_t> data = EncodeRealtimeDatagram(kind, credentials.scope, credentials.participantId,
+                                                        credentials.tokenHigh, credentials.tokenLow);
+    UDPpacket packet{};
+    packet.data = data.data();
+    packet.len = static_cast<int>(data.size());
+    packet.maxlen = packet.len;
+    packet.address = peerAddress;
+    return SDLNet_UDP_Send(socket, -1, &packet) != 0;
+}
+
+void DirectSession::ReceiveRealtime(UDPsocket socket, IPaddress& peerAddress, bool& hasPeerAddress) {
+    std::array<uint8_t, kMaximumRealtimeDatagramSize> buffer{};
+    UDPpacket datagram{};
+    datagram.data = buffer.data();
+    datagram.maxlen = static_cast<int>(buffer.size());
+
+    while (SDLNet_UDP_Recv(socket, &datagram) != 0) {
+        RealtimeCredentials credentials;
+        {
+            std::lock_guard<std::mutex> lock(realtimeMutex);
+            credentials = realtimeCredentials;
+        }
+        uint16_t kind = 0;
+        if (!realtimeConfigured ||
+            !SameCredentials(datagram.data, static_cast<size_t>(datagram.len), credentials.scope,
+                             credentials.participantId, credentials.tokenHigh, credentials.tokenLow, kind)) {
+            continue;
+        }
+
+        const bool fromExpectedPeer = hasPeerAddress && datagram.address.host == peerAddress.host &&
+                                      datagram.address.port == peerAddress.port;
+        if (role == SessionRole::Host && kind == kRealtimeBind) {
+            peerAddress = datagram.address;
+            hasPeerAddress = true;
+            {
+                std::lock_guard<std::mutex> lock(realtimeMutex);
+                lastRealtimeReceiveMs = SDL_GetTicks64();
+            }
+            realtimeReady = true;
+            SendRealtimeControl(socket, peerAddress, kRealtimeBindAck);
+            continue;
+        }
+        if (!fromExpectedPeer) {
+            continue;
+        }
+        {
+            std::lock_guard<std::mutex> lock(realtimeMutex);
+            lastRealtimeReceiveMs = SDL_GetTicks64();
+        }
+        if (role == SessionRole::Client && kind == kRealtimeBindAck) {
+            realtimeReady = true;
+            continue;
+        }
+        if (kind != kRealtimeData || !realtimeReady || datagram.len <= static_cast<int>(kRealtimeHeaderSize)) {
+            continue;
+        }
+
+        std::vector<uint8_t> encoded(datagram.data + kRealtimeHeaderSize, datagram.data + datagram.len);
+        Packet packet;
+        size_t consumed = 0;
+        std::string error;
+        if (TryDecodePacket(encoded, packet, consumed, error) != DecodeResult::Decoded || consumed != encoded.size() ||
+            !IsRealtimeDatagram(packet.type)) {
+            continue;
+        }
+        PushIncoming(std::move(packet));
+    }
 }
 
 bool DirectSession::ReceiveAvailable(TCPsocket socket, SDLNet_SocketSet socketSet,
@@ -252,22 +700,65 @@ bool DirectSession::ReceiveAvailable(TCPsocket socket, SDLNet_SocketSet socketSe
             FailPeer(error);
             return false;
         }
-        {
-            std::lock_guard<std::mutex> lock(incomingMutex);
-            if (IsReplaceableSnapshot(packet.type)) {
-                for (auto iterator = incoming.begin(); iterator != incoming.end();) {
-                    if (iterator->type == packet.type && iterator->streamId == packet.streamId) {
-                        iterator = incoming.erase(iterator);
-                    } else {
-                        ++iterator;
-                    }
-                }
-            }
-            incoming.push_back(std::move(packet));
-        }
+        PushIncoming(std::move(packet));
         receiveBuffer.erase(receiveBuffer.begin(), receiveBuffer.begin() + consumed);
     }
     return true;
+}
+
+void DirectSession::PushIncoming(Packet packet) {
+    if (IsRealtimeSnapshot(packet.type)) {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        const auto key = std::make_pair(packet.type, FreshnessStream(packet.type, packet.streamId));
+        const auto previous = latestRealtimeSequences.find(key);
+        if (previous != latestRealtimeSequences.end() && !IsNewerSequence(packet.sequence, previous->second)) {
+            return;
+        }
+        latestRealtimeSequences[key] = packet.sequence;
+    }
+
+    std::lock_guard<std::mutex> lock(incomingMutex);
+    if (IsReplaceableSnapshot(packet.type)) {
+        const uint64_t packetStream = packet.streamId;
+        for (auto iterator = incoming.begin(); iterator != incoming.end();) {
+            if (iterator->type == packet.type && iterator->streamId == packetStream) {
+                iterator = incoming.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+    }
+    incoming.push_back(std::move(packet));
+}
+
+void DirectSession::FallBackRealtimePackets() {
+    std::deque<OutgoingPacket> packets;
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        packets.swap(realtimeOutgoing);
+        for (auto& [key, repeated] : repeatedRealtimeOutgoing) {
+            packets.push_back(std::move(repeated.packet));
+        }
+        repeatedRealtimeOutgoing.clear();
+    }
+    if (packets.empty()) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(outgoingMutex);
+    while (!packets.empty()) {
+        OutgoingPacket packet = std::move(packets.front());
+        packets.pop_front();
+        const uint64_t packetStream = packet.streamId;
+        for (auto iterator = outgoing.begin(); iterator != outgoing.end();) {
+            if (iterator->type == packet.type && iterator->streamId == packetStream) {
+                iterator = outgoing.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+        outgoing.push_back(std::move(packet));
+    }
 }
 
 bool DirectSession::SendAll(TCPsocket socket, const std::vector<uint8_t>& data) {
@@ -309,6 +800,17 @@ void DirectSession::ClearPacketQueues() {
     {
         std::lock_guard<std::mutex> lock(outgoingMutex);
         outgoing.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(realtimeMutex);
+        realtimeOutgoing.clear();
+        repeatedRealtimeOutgoing.clear();
+        latestRealtimeSequences.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(realtimeTestMutex);
+        realtimeTestDatagramCount = 0;
+        realtimeTestHeldDatagram.clear();
     }
 }
 

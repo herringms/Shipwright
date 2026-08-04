@@ -12,7 +12,7 @@
 namespace HyruleCoop {
 
 constexpr uint32_t kPacketMagic = 0x48434F50; // HCOP
-constexpr uint16_t kProtocolVersion = 4;
+constexpr uint16_t kProtocolVersion = 5;
 constexpr size_t kHeaderSize = 24;
 constexpr uint32_t kMaximumPayloadSize = 1024 * 1024;
 constexpr size_t kMaximumActorAdapterWords = 64;
@@ -39,6 +39,7 @@ enum class MessageType : uint16_t {
     CollectibleIntent = 14,
     ProgressionSnapshot = 15,
     ProgressionIntent = 16,
+    PlayerPresentation = 17,
 };
 
 struct Packet {
@@ -102,6 +103,7 @@ struct HelloMessage {
 
 struct HelloAckMessage {
     bool accepted = false;
+    std::string playerName;
     uint64_t participantId = 0;
     uint64_t sessionEpoch = 0;
     uint32_t worldGeneration = 0;
@@ -136,6 +138,7 @@ struct PlayerSnapshotMessage {
     int8_t boots = 0;
     int8_t shield = 0;
     int8_t tunic = 0;
+    uint8_t currentMask = 0;
     uint32_t stateFlags1 = 0;
     uint32_t stateFlags2 = 0;
     uint8_t buttonItem = 0;
@@ -150,6 +153,19 @@ struct PlayerSnapshotMessage {
     int16_t focusActorId = -1;
     int8_t meleeWeaponState = 0;
     int8_t meleeWeaponAnimation = 0;
+};
+
+struct PlayerPresentationMessage {
+    SessionScope scope;
+    uint32_t revision = 0;
+    int8_t boots = 0;
+    int8_t shield = 0;
+    int8_t tunic = 0;
+    uint8_t currentMask = 0;
+    uint8_t buttonItem = 0;
+    int8_t itemAction = 0;
+    int8_t heldItemAction = 0;
+    uint8_t modelGroup = 0;
 };
 
 struct CycleSnapshotMessage {
@@ -196,6 +212,7 @@ struct ActorSnapshotMessage {
     SessionScope scope;
     uint32_t hostTick = 0;
     uint64_t entityId = 0;
+    uint64_t acknowledgedRequestId = 0;
     int16_t scene = -1;
     int16_t room = -1;
     int16_t actorId = -1;
@@ -312,6 +329,8 @@ std::vector<uint8_t> EncodeClockSnapshot(const ClockSnapshotMessage& message);
 std::optional<ClockSnapshotMessage> DecodeClockSnapshot(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodePlayerSnapshot(const PlayerSnapshotMessage& message);
 std::optional<PlayerSnapshotMessage> DecodePlayerSnapshot(const std::vector<uint8_t>& payload);
+std::vector<uint8_t> EncodePlayerPresentation(const PlayerPresentationMessage& message);
+std::optional<PlayerPresentationMessage> DecodePlayerPresentation(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodeCycleSnapshot(const CycleSnapshotMessage& message);
 std::optional<CycleSnapshotMessage> DecodeCycleSnapshot(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodeSnapshotRequest(const SnapshotRequestMessage& message);

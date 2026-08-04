@@ -249,6 +249,7 @@ std::optional<HelloMessage> DecodeHello(const std::vector<uint8_t>& payload) {
 std::vector<uint8_t> EncodeHelloAck(const HelloAckMessage& message) {
     ByteWriter writer;
     writer.WriteU8(message.accepted ? 1 : 0);
+    writer.WriteString(message.playerName);
     writer.WriteU64(message.participantId);
     writer.WriteU64(message.sessionEpoch);
     writer.WriteU32(message.worldGeneration);
@@ -263,7 +264,7 @@ std::optional<HelloAckMessage> DecodeHelloAck(const std::vector<uint8_t>& payloa
     ByteReader reader(payload);
     uint8_t accepted;
     HelloAckMessage message;
-    if (!reader.ReadU8(accepted) || !reader.ReadU64(message.participantId) ||
+    if (!reader.ReadU8(accepted) || !reader.ReadString(message.playerName) || !reader.ReadU64(message.participantId) ||
         !reader.ReadU64(message.sessionEpoch) || !reader.ReadU32(message.worldGeneration) ||
         !reader.ReadU64(message.resumeTokenHigh) || !reader.ReadU64(message.resumeTokenLow) ||
         !ReadCapabilities(reader, message.capabilities) || !reader.ReadString(message.reason) || !reader.AtEnd()) {
@@ -324,6 +325,7 @@ std::vector<uint8_t> EncodePlayerSnapshot(const PlayerSnapshotMessage& message) 
     writer.WriteU8(static_cast<uint8_t>(message.boots));
     writer.WriteU8(static_cast<uint8_t>(message.shield));
     writer.WriteU8(static_cast<uint8_t>(message.tunic));
+    writer.WriteU8(message.currentMask);
     writer.WriteU32(message.stateFlags1);
     writer.WriteU32(message.stateFlags2);
     writer.WriteU8(message.buttonItem);
@@ -408,7 +410,8 @@ std::optional<PlayerSnapshotMessage> DecodePlayerSnapshot(const std::vector<uint
         return std::nullopt;
     }
     message.tunic = static_cast<int8_t>(signed8);
-    if (!reader.ReadU32(message.stateFlags1) || !reader.ReadU32(message.stateFlags2) ||
+    if (!reader.ReadU8(message.currentMask) || !reader.ReadU32(message.stateFlags1) ||
+        !reader.ReadU32(message.stateFlags2) ||
         !reader.ReadU8(message.buttonItem) || !reader.ReadU8(signed8)) {
         return std::nullopt;
     }
@@ -442,6 +445,51 @@ std::optional<PlayerSnapshotMessage> DecodePlayerSnapshot(const std::vector<uint
     }
     message.meleeWeaponAnimation = static_cast<int8_t>(signed8);
     return reader.AtEnd() ? std::optional<PlayerSnapshotMessage>(message) : std::nullopt;
+}
+
+std::vector<uint8_t> EncodePlayerPresentation(const PlayerPresentationMessage& message) {
+    ByteWriter writer;
+    WriteScope(writer, message.scope);
+    writer.WriteU32(message.revision);
+    writer.WriteU8(static_cast<uint8_t>(message.boots));
+    writer.WriteU8(static_cast<uint8_t>(message.shield));
+    writer.WriteU8(static_cast<uint8_t>(message.tunic));
+    writer.WriteU8(message.currentMask);
+    writer.WriteU8(message.buttonItem);
+    writer.WriteU8(static_cast<uint8_t>(message.itemAction));
+    writer.WriteU8(static_cast<uint8_t>(message.heldItemAction));
+    writer.WriteU8(message.modelGroup);
+    return writer.Data();
+}
+
+std::optional<PlayerPresentationMessage> DecodePlayerPresentation(const std::vector<uint8_t>& payload) {
+    ByteReader reader(payload);
+    PlayerPresentationMessage message;
+    uint8_t signed8 = 0;
+    if (!ReadScope(reader, message.scope) || !reader.ReadU32(message.revision) || !reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.boots = static_cast<int8_t>(signed8);
+    if (!reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.shield = static_cast<int8_t>(signed8);
+    if (!reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.tunic = static_cast<int8_t>(signed8);
+    if (!reader.ReadU8(message.currentMask) || !reader.ReadU8(message.buttonItem) || !reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.itemAction = static_cast<int8_t>(signed8);
+    if (!reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.heldItemAction = static_cast<int8_t>(signed8);
+    if (!reader.ReadU8(message.modelGroup) || !reader.AtEnd()) {
+        return std::nullopt;
+    }
+    return message;
 }
 
 std::vector<uint8_t> EncodeCycleSnapshot(const CycleSnapshotMessage& message) {
@@ -578,6 +626,7 @@ std::vector<uint8_t> EncodeActorSnapshot(const ActorSnapshotMessage& message) {
     WriteScope(writer, message.scope);
     writer.WriteU32(message.hostTick);
     writer.WriteU64(message.entityId);
+    writer.WriteU64(message.acknowledgedRequestId);
     writer.WriteU16(static_cast<uint16_t>(message.scene));
     writer.WriteU16(static_cast<uint16_t>(message.room));
     writer.WriteU16(static_cast<uint16_t>(message.actorId));
@@ -621,7 +670,8 @@ std::optional<ActorSnapshotMessage> DecodeActorSnapshot(const std::vector<uint8_
     uint16_t signedValue = 0;
     uint8_t alive = 0;
     if (!ReadScope(reader, message.scope) || !reader.ReadU32(message.hostTick) ||
-        !reader.ReadU64(message.entityId) || !reader.ReadU16(signedValue)) {
+        !reader.ReadU64(message.entityId) || !reader.ReadU64(message.acknowledgedRequestId) ||
+        !reader.ReadU16(signedValue)) {
         return std::nullopt;
     }
     message.scene = static_cast<int16_t>(signedValue);

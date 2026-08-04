@@ -12,8 +12,8 @@ Sneaky-Pug and Hide and Seek DX exposed a distinction that also applies to OoT a
 - An authority publishes what the shared game must mean.
 - Local reconcilers make each engine instance satisfy that declared state.
 
-Ordered TCP solves byte delivery. It does not solve unsafe application timing, reconnect reconstruction, duplicate
-side effects, or deciding which peer owns a transition.
+Reliable delivery solves byte delivery. It does not solve unsafe application timing, reconnect reconstruction,
+duplicate side effects, or deciding which peer owns a transition.
 
 ## Reusable Model
 
@@ -131,6 +131,18 @@ This is analogous to Sneaky-Pug's provider save namespaces: world identity and p
 `DirectSession` should remain a transport concern. Packet framing, keyed snapshot coalescing, compatibility checks, and
 socket lifecycle do not belong in the coordinator.
 
+The transport is hybrid. TCP remains the reliable control and durability lane for handshakes, barriers, equipment
+changes, pickup commits, damage/death confirmation, progression, and world events. Authenticated UDP on the same
+numeric port carries high-frequency replaceable player, clock, and actor snapshots. UDP snapshots retain packet
+sequence checks and keyed coalescing; brief action-bearing player streams remain distinct so a later idle pose cannot
+erase an unsent sword swing. If UDP cannot bind, times out, exceeds the non-fragmenting datagram budget, or fails to
+send, snapshots return to TCP without ending the session. The durable reconnect snapshot remains the final authority.
+Guest attack intents use a bounded 600 ms UDP retry window with one stable request ID and packet sequence. The host's
+request ledger makes those retries idempotent, and every handled attack against a known actor receives a reliable TCP
+actor-state response that cancels the guest's retry window. An unanswered intent falls back to TCP after that window.
+Attack validation does not depend on UDP arrival order: the host accepts the client's collision claim within a bounded
+player-state window, then independently validates session, scene, target identity, distance, and actor damage rules.
+
 The current scene-flag work is a valid foundation if treated as canonical snapshots. Its eventual authority flow
 should distinguish:
 
@@ -191,11 +203,11 @@ contracts, and add each domain to the localhost proof before a remote build is p
   durable global event-check flags. Add host-owned world-event intents and snapshots with echo suppression. The first
   acceptance case must open the already-loaded waterfall for both players after either player performs the song, then
   remain open through scene changes and guest reconnect without replaying the song.
-- Remote Links need their configured player names rendered overhead and their positions shown on the minimap. Reuse
-  Shipwright's existing actor name-tag and Anchor compass-icon rendering rather than introducing another HUD system.
-  Preserve both peer names during the handshake, enable both features by default, and expose separate Direct Co-op
-  toggles. A marker appears only in the same scene and, in dungeons, the currently displayed room; the remote marker
-  must remain visually distinct from the local player's marker. Off-scene pause-map locations can be a later extension.
+- Remote Links now preserve both peer names in the handshake and register Shipwright's existing world-space actor
+  name-tag renderer when the remote Link spawns. The remaining location work is a minimap indicator using Anchor's
+  compass-icon rendering rather than another HUD system. A marker should appear only in the same scene and, in
+  dungeons, the currently displayed room; the remote marker must remain visually distinct from the local player's
+  marker. Off-scene pause-map locations can be a later extension.
 - Consumable pickups need host-committed, idempotent pickup operations rather than shared resource counters. A recovery
   heart collected by either player is consumed once and applies its recovery amount to both players' local health,
   clamped independently. An ammunition pickup similarly applies its normal delta and eligibility rules to both local
