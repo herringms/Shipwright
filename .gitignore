@@ -453,6 +453,7 @@ _packages
 */extract_assets_cmake*
 /build*
 /dist/
+/.agents/
 
 soh/src/boot/build.c
 soh/properties.h
