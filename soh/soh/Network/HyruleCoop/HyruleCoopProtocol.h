@@ -47,6 +47,8 @@ struct Packet {
     uint32_t sequence;
     std::vector<uint8_t> payload;
     uint64_t streamId = 0;
+    uint64_t receivedAtMs = 0;
+    bool acknowledgedRealtime = false;
 };
 
 enum class DecodeResult {

@@ -77,6 +77,27 @@ void DrawDirectCoopMenu(WidgetInfo&) {
     ImGui::TextWrapped("%s", manager->GetStatusText().c_str());
     if (manager->IsReady()) {
         ImGui::TextWrapped("Proof active: the host owns the clock, durable scene flags, and Deku Baba state.");
+        const HyruleCoop::TransportTelemetry telemetry = manager->GetTransportTelemetry();
+        ImGui::Spacing();
+        ImGui::SeparatorText("Connection Health");
+        ImGui::Text("Realtime: %s", telemetry.realtimeReady ? "UDP active" : "TCP fallback");
+        ImGui::Text("Round trip: %u ms  Jitter: %u ms", telemetry.roundTripMs,
+                    telemetry.roundTripJitterMs);
+        ImGui::Text("Player updates: %u ms  Arrival jitter: %u ms", telemetry.snapshotIntervalMs,
+                    telemetry.snapshotJitterMs);
+        ImGui::Text("Queues: reliable %u  incoming %u  pending acknowledgements %u",
+                    telemetry.reliableQueueDepth, telemetry.incomingQueueDepth,
+                    telemetry.pendingAcknowledgements);
+        ImGui::Text("Delays: reliable %u ms  apply %u ms", telemetry.lastTcpQueueDelayMs,
+                    telemetry.lastApplicationDelayMs);
+        ImGui::TextDisabled("Session peaks: reliable %u, incoming %u, send %u ms, apply %u ms",
+                            telemetry.reliableQueueHighWater, telemetry.incomingQueueHighWater,
+                            telemetry.maximumTcpQueueDelayMs, telemetry.maximumApplicationDelayMs);
+        ImGui::TextDisabled("Reliable realtime: %llu sent, %llu retries, %llu duplicates, %llu TCP fallbacks",
+                            static_cast<unsigned long long>(telemetry.acknowledgedEventsSent),
+                            static_cast<unsigned long long>(telemetry.acknowledgedEventRetries),
+                            static_cast<unsigned long long>(telemetry.realtimeDuplicates),
+                            static_cast<unsigned long long>(telemetry.acknowledgedEventFallbacks));
     }
 }
 

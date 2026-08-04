@@ -132,14 +132,22 @@ This is analogous to Sneaky-Pug's provider save namespaces: world identity and p
 socket lifecycle do not belong in the coordinator.
 
 The transport is hybrid. TCP remains the reliable control and durability lane for handshakes, barriers, equipment
-changes, pickup commits, damage/death confirmation, progression, and world events. Authenticated UDP on the same
-numeric port carries high-frequency replaceable player, clock, and actor snapshots. UDP snapshots retain packet
-sequence checks and keyed coalescing; brief action-bearing player streams remain distinct so a later idle pose cannot
-erase an unsent sword swing. If UDP cannot bind, times out, exceeds the non-fragmenting datagram budget, or fails to
-send, snapshots return to TCP without ending the session. The durable reconnect snapshot remains the final authority.
-Guest attack intents use a bounded 600 ms UDP retry window with one stable request ID and packet sequence. The host's
-request ledger makes those retries idempotent, and every handled attack against a known actor receives a reliable TCP
-actor-state response that cancels the guest's retry window. An unanswered intent falls back to TCP after that window.
+changes, pickup commits, progression, and world events. Authenticated UDP on the same numeric port carries
+high-frequency replaceable player, clock, and actor snapshots plus acknowledged realtime outcomes such as immediate
+damage/death confirmation. UDP snapshots retain packet sequence checks and keyed coalescing; brief action-bearing
+player streams remain distinct so a later idle pose cannot erase an unsent sword swing. Important realtime outcomes
+use sequence acknowledgements, retransmission, duplicate suppression, and a bounded TCP fallback. If UDP cannot bind,
+times out, exceeds the non-fragmenting datagram budget, or fails to send, pending traffic returns to TCP without ending
+the session. The durable reconnect snapshot remains the final authority. Guest attack intents use a bounded 600 ms
+UDP retry window with one stable request ID and packet sequence. The host's request ledger makes those retries
+idempotent, and every handled attack against a known actor receives an acknowledged actor-state response that cancels
+the guest's retry window. An unanswered intent or response falls back to TCP after its deadline.
+
+Remote player rendering consumes a 100 ms snapshot interpolation buffer and extrapolates for at most 100 ms. Scene,
+room, entrance, age, long-gap, and teleport discontinuities reset the buffer and snap immediately. Authoritative combat
+validation continues to use the newest raw player state rather than the delayed presentation sample. Live telemetry
+tracks RTT and jitter, snapshot arrival cadence, queue depth and high-water marks, send/application delay, UDP/TCP byte
+counts, acknowledged-event retries, duplicate suppression, and TCP fallbacks.
 Attack validation does not depend on UDP arrival order: the host accepts the client's collision claim within a bounded
 player-state window, then independently validates session, scene, target identity, distance, and actor damage rules.
 

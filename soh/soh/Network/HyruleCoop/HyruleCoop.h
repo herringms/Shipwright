@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DirectSession.h"
+#include "PlayerInterpolation.h"
 
 #include <cstdint>
 #include <string>
@@ -37,6 +38,7 @@ class Manager {
     bool IsActive() const;
     bool IsReady() const;
     bool IsPreparingRemotePlayer() const;
+    TransportTelemetry GetTransportTelemetry() const;
     const PlayerSnapshotMessage* GetRemotePlayerSnapshot() const;
     const std::string& GetRemotePlayerName() const;
     void SanitizeSaveCopy(void* saveContext) const;
@@ -131,6 +133,8 @@ class Manager {
     uint64_t guestTokenLow = 0;
     CapabilityList negotiatedCapabilities;
     std::optional<PlayerSnapshotMessage> remotePlayerSnapshot;
+    PlayerSnapshotInterpolator remotePlayerInterpolator;
+    mutable std::optional<PlayerSnapshotMessage> remotePlayerRenderSnapshot;
     std::optional<PlayerPresentationMessage> remotePlayerPresentation;
     std::optional<PlayerPresentationMessage> lastSentPlayerPresentation;
     uint32_t nextPlayerPresentationRevision = 1;

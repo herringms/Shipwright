@@ -48,6 +48,17 @@ static bool WaitForRealtime(DirectSession& host, DirectSession& guest, std::chro
     return false;
 }
 
+static bool WaitForAcknowledgements(DirectSession& session, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (session.GetTelemetry().pendingAcknowledgements == 0) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return false;
+}
+
 int main() {
     assert(SDL_Init(0) == 0);
     assert(SDLNet_Init() == 0);
@@ -132,10 +143,18 @@ int main() {
     attackResult.acknowledgedRequestId = attack.requestId;
     attackResult.actorId = 1;
     attackResult.alive = true;
-    assert(host.SendReliable(MessageType::ActorSnapshot, EncodeActorSnapshot(attackResult), attackResult.entityId));
+    assert(host.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(attackResult),
+                                         attackResult.entityId, 30, 1000));
     const std::vector<Packet> attackResultPackets = WaitForPackets(guest, std::chrono::seconds(2));
     assert(attackResultPackets.size() == 1);
     assert(attackResultPackets[0].type == MessageType::ActorSnapshot);
+    assert(attackResultPackets[0].acknowledgedRealtime);
+    assert(WaitForAcknowledgements(host, std::chrono::seconds(2)));
+    const TransportTelemetry acknowledgedTelemetry = host.GetTelemetry();
+    assert(acknowledgedTelemetry.acknowledgedEventsSent == 1);
+    assert(acknowledgedTelemetry.acknowledgedEventsReceived == 1);
+    assert(acknowledgedTelemetry.pendingAcknowledgements == 0);
+    assert(guest.TakeIncomingPackets().empty());
 
     for (uint32_t tick = 0; tick < 100; ++tick) {
         PlayerSnapshotMessage snapshot;
@@ -178,6 +197,22 @@ int main() {
     assert(foundProgression);
     assert(foundFirstPlayer);
     assert(foundSecondPlayer);
+    const TransportTelemetry realtimeTelemetry = guest.GetTelemetry();
+    assert(realtimeTelemetry.realtimeReady);
+    assert(realtimeTelemetry.realtimeDatagramsReceived > 0);
+    assert(realtimeTelemetry.snapshotIntervalMs > 0);
+
+    guest.DisableRealtime();
+    attackResult.entityId = 0xBABC;
+    attackResult.acknowledgedRequestId = 79;
+    assert(host.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(attackResult),
+                                         attackResult.entityId, 20, 120));
+    const std::vector<Packet> acknowledgedFallbackPackets =
+        WaitForPackets(guest, std::chrono::seconds(2));
+    assert(acknowledgedFallbackPackets.size() == 1);
+    assert(acknowledgedFallbackPackets[0].type == MessageType::ActorSnapshot);
+    assert(!acknowledgedFallbackPackets[0].acknowledgedRealtime);
+    assert(host.GetTelemetry().acknowledgedEventFallbacks == 1);
 
     host.DisableRealtime();
     assert(!host.IsRealtimeReady());

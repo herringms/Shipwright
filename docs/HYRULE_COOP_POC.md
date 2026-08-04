@@ -34,8 +34,10 @@ An engine-independent architectural test executes that entire sequence, includin
 - Request identity is `(sessionEpoch, worldGeneration, participantId, requestId)`.
 - Scene flags, progression, and actors have independent revisions or keyed streams.
 - Coordinated transitions use a barrier operation epoch and an explicit target scene, optional room, and entrance.
-- TCP is the reliable control and durability lane. Authenticated UDP carries replaceable realtime snapshots and
-  bounded, idempotent attack-intent retries. Transport ordering does not replace authority, idempotency, or readiness.
+- TCP is the reliable control and durability lane. Authenticated UDP carries replaceable realtime snapshots,
+  bounded idempotent attack-intent retries, and acknowledged realtime outcomes. Important UDP outcomes are retried,
+  deduplicated, and fall back to TCP after a bounded deadline. Transport ordering does not replace authority,
+  idempotency, or readiness.
 
 ## Session save overlay
 
@@ -52,10 +54,13 @@ button/equipment choices remain player-owned.
 ## Protocol
 
 `DirectSession` is a persistent one-host/one-guest hybrid transport. Framed TCP carries reliable control and durable
-state. Authenticated UDP on the same numeric port carries high-frequency player, clock, and actor snapshots plus
-bounded attack-intent retries, with TCP fallback when realtime delivery is unavailable. It supports keyed replacement,
-freshness rejection, malformed-peer rejection, explicit rejection delivery, and reconnecting a replacement guest
-without destroying canonical host state.
+state. Authenticated UDP on the same numeric port carries high-frequency player, clock, and actor snapshots, bounded
+attack-intent retries, and acknowledged realtime outcomes, with TCP fallback when realtime delivery is unavailable or
+an acknowledgement deadline expires. It supports keyed replacement, freshness rejection, duplicate suppression,
+malformed-peer rejection, explicit rejection delivery, and reconnecting a replacement guest without destroying
+canonical host state. Remote Link presentation uses a 100 ms interpolation buffer with bounded extrapolation so WAN
+jitter does not directly become visible position and joint stutter. The Direct Co-op menu exposes RTT, arrival jitter,
+queue depth, application delay, retransmissions, duplicates, and fallback counts for live diagnosis.
 
 The shared OoT/MM protocol includes:
 

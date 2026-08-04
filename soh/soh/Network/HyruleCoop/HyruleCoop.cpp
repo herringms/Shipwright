@@ -11,6 +11,7 @@
 #include "soh/OTRGlobals.h"
 #include "ship/Context.h"
 #include "ship/utils/StrHash64.h"
+#include <SDL2/SDL.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -365,6 +366,8 @@ void Manager::Update() {
     if (transportState == TransportState::Error) {
         DestroyRemotePlayer();
         remotePlayerSnapshot.reset();
+        remotePlayerInterpolator.Reset();
+        remotePlayerRenderSnapshot.reset();
         if (phase != ConnectionPhase::Failed || protocolError.empty()) {
             protocolError = transport.GetLastError();
             phase = ConnectionPhase::Failed;
@@ -386,6 +389,8 @@ void Manager::Update() {
         } else {
             DestroyRemotePlayer();
             remotePlayerSnapshot.reset();
+            remotePlayerInterpolator.Reset();
+            remotePlayerRenderSnapshot.reset();
             if (phase != ConnectionPhase::Failed || protocolError.empty()) {
                 protocolError = "The host disconnected";
                 phase = ConnectionPhase::Failed;
@@ -464,8 +469,20 @@ bool Manager::IsPreparingRemotePlayer() const {
     return preparingRemotePlayer;
 }
 
+TransportTelemetry Manager::GetTransportTelemetry() const {
+    return transport.GetTelemetry();
+}
+
 const PlayerSnapshotMessage* Manager::GetRemotePlayerSnapshot() const {
-    return remotePlayerSnapshot.has_value() ? &remotePlayerSnapshot.value() : nullptr;
+    PlayerSnapshotMessage sampled;
+    if (!remotePlayerInterpolator.Sample(SDL_GetTicks64(), sampled)) {
+        return nullptr;
+    }
+    if (remotePlayerPresentation.has_value()) {
+        ApplyPresentation(sampled, *remotePlayerPresentation);
+    }
+    remotePlayerRenderSnapshot = sampled;
+    return &remotePlayerRenderSnapshot.value();
 }
 
 const std::string& Manager::GetRemotePlayerName() const {
@@ -715,6 +732,8 @@ void Manager::ResetPeerState() {
     playerId = 0;
     remotePlayerName.clear();
     remotePlayerSnapshot.reset();
+    remotePlayerInterpolator.Reset();
+    remotePlayerRenderSnapshot.reset();
     remotePlayerPresentation.reset();
     lastSentPlayerPresentation.reset();
     nextPlayerPresentationRevision = 1;
@@ -964,6 +983,7 @@ void Manager::HandlePlayerSnapshot(const Packet& packet) {
         ApplyPresentation(*message, *remotePlayerPresentation);
     }
     remotePlayerSnapshot = message;
+    remotePlayerInterpolator.Push(*message, SDL_GetTicks64());
     if (needsRespawn) {
         DestroyRemotePlayer();
         RefreshRemotePlayer();
@@ -1178,7 +1198,8 @@ void Manager::HandleAttackIntent(const Packet& packet) {
         if (snapshot != actorSnapshots.end()) {
             ActorSnapshotMessage response = snapshot->second;
             response.acknowledgedRequestId = message->requestId;
-            transport.SendReliable(MessageType::ActorSnapshot, EncodeActorSnapshot(response), message->entityId);
+            transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(response),
+                                               message->entityId);
         }
         return;
     }
@@ -1223,7 +1244,8 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     if (authoritativeState != actorSnapshots.end()) {
         ActorSnapshotMessage response = authoritativeState->second;
         response.acknowledgedRequestId = message->requestId;
-        transport.SendReliable(MessageType::ActorSnapshot, EncodeActorSnapshot(response), message->entityId);
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(response),
+                                           message->entityId);
     }
 }
 
@@ -1633,9 +1655,18 @@ void Manager::SendDekuBabaSnapshot(void* actor, bool alive) {
     }
     ActorSnapshotMessage message =
         CaptureDekuBabaSnapshot(actor, gPlayState->sceneNum, frameCounter, sessionScope, alive);
+    const auto previous = actorSnapshots.find(message.entityId);
+    const bool importantTransition = previous == actorSnapshots.end() ||
+                                     previous->second.alive != message.alive ||
+                                     previous->second.health != message.health;
     actorSnapshots[message.entityId] = message;
     localDekuBabas[message.entityId] = actor;
-    transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    if (importantTransition) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message),
+                                           message.entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    }
 }
 
 void Manager::UpdateDekuBaba(void* actor) {
@@ -1700,11 +1731,20 @@ void Manager::SendGohmaSnapshot(void* actor, bool alive) {
         return;
     }
     ActorSnapshotMessage message = CaptureGohmaSnapshot(actor, gPlayState->sceneNum, frameCounter, sessionScope, alive);
+    const auto previous = actorSnapshots.find(message.entityId);
+    const bool importantTransition = previous == actorSnapshots.end() ||
+                                     previous->second.alive != message.alive ||
+                                     previous->second.health != message.health;
     actorSnapshots[message.entityId] = message;
     if (alive) {
         localGohmas[message.entityId] = actor;
     }
-    transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    if (importantTransition) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message),
+                                           message.entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    }
 }
 
 void Manager::UpdateGohma(void* actor) {
