@@ -38,6 +38,13 @@ The first launch may create or expand `shipofharkinian.json`, create `logs` and 
 player's ROM, and initialize or migrate `%LOCALAPPDATA%\HyruleCoop\Save`. Players retain the original
 `HyruleCoop.exe`; later releases are installed automatically into new version directories.
 
+Player preferences are migrated independently from saves. On first setup, the launcher inspects only recognized
+immediate sibling installations and selects the newest `shipofharkinian.json`. It imports that file when the AppData
+configuration is missing or still byte-for-byte equal to the shipped bootstrap default. A customized AppData
+configuration always wins. The launcher records the decision in `preferences-migration-v1.json`, and subsequent
+runtime updates continue to preserve the AppData configuration. This retains enhancement, autosave, message, input,
+controller, audio, and display choices without recursively searching unrelated folders or overwriting newer choices.
+
 ## Release gate
 
 `scripts/windows/New-HyruleCoopRelease.ps1` constructs the GitHub runtime assets and one-time bootstrap from an
@@ -45,8 +52,8 @@ explicit allowlist. It requires an explicit private test save, runs both matchin
 localhost gates, and rejects ROMs, generated O2R archives, saves, logs, mods, or personal configuration in the
 resulting ZIPs.
 
-`scripts/windows/Test-HyruleCoopLauncher.ps1` proves bootstrap delegation, conservative import, runtime installation,
-player-data preservation, rollback, and offline launch.
+`scripts/windows/Test-HyruleCoopLauncher.ps1` proves bootstrap delegation, conservative preference and player-data
+import, runtime installation, player-data preservation, rollback, and offline launch.
 
 `scripts/windows/New-HyruleCoopUpdate.ps1` runs the complete two-instance localhost proof before producing a patch.
 It then applies the staged update to a disposable installation, verifies the complete managed runtime, and proves

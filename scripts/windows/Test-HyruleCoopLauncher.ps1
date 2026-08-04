@@ -30,6 +30,8 @@ New-Item -ItemType Directory -Path $bootstrapPayload, $legacyRoot, $appDataRoot 
 Copy-Item -LiteralPath $bootstrapExe -Destination (Join-Path $bootstrapRoot "HyruleCoop.exe")
 Copy-Item -LiteralPath $launcherExe -Destination (Join-Path $bootstrapPayload "HyruleCoopLauncher.exe")
 [IO.File]::WriteAllText((Join-Path $bootstrapPayload "default-shipofharkinian.json"), '{"default":true}')
+[IO.Directory]::CreateDirectory((Join-Path $appDataRoot "UserData")) | Out-Null
+[IO.File]::WriteAllText((Join-Path $appDataRoot "UserData\shipofharkinian.json"), '{"default":true}')
 
 [IO.File]::WriteAllText((Join-Path $legacyRoot "soh.exe"), "legacy executable")
 [IO.File]::WriteAllText((Join-Path $legacyRoot "oot.o2r"), "legacy generated archive")
@@ -104,12 +106,31 @@ $release1.Manifest | ConvertTo-Json -Depth 6 |
 
 $saveOnlyRoot = Join-Path $testRoot "Legacy Saves Only"
 $incompleteAppData = Join-Path $testRoot "Incomplete App Data\HyruleCoop"
-New-Item -ItemType Directory -Path (Join-Path $saveOnlyRoot "Save"), $incompleteAppData -Force | Out-Null
+$customAppData = Join-Path $testRoot "Customized App Data\HyruleCoop"
+New-Item -ItemType Directory -Path (Join-Path $saveOnlyRoot "Save"), $incompleteAppData,
+    (Join-Path $customAppData "UserData") -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $saveOnlyRoot "soh.exe"), "legacy executable")
 [IO.File]::WriteAllText((Join-Path $saveOnlyRoot "Save\global.sav"), "save without generated assets")
+[IO.File]::WriteAllText((Join-Path $customAppData "UserData\shipofharkinian.json"), '{"custom":true}')
 
 $oldRoot = $env:HYRULE_COOP_ROOT
 try {
+    $env:HYRULE_COOP_ROOT = $customAppData
+    $customized = Start-Process -FilePath (Join-Path $bootstrapRoot "HyruleCoop.exe") `
+        -ArgumentList @("--headless", "--no-launch", "--offline", "--import-candidate",
+            ('"' + $legacyRoot + '"')) -WorkingDirectory $bootstrapRoot -PassThru
+    $customized.WaitForExit(30000) | Out-Null
+    $preferenceMarker = Join-Path $customAppData "preferences-migration-v1.json"
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline -and -not (Test-Path -LiteralPath $preferenceMarker)) {
+        Start-Sleep -Milliseconds 200
+    }
+    $preservedPreferences = Get-Content -LiteralPath $preferenceMarker -Raw | ConvertFrom-Json
+    if ((Get-Content -LiteralPath (Join-Path $customAppData "UserData\shipofharkinian.json") -Raw) -ne
+        '{"custom":true}' -or $preservedPreferences.action -ne "preserved") {
+        throw "Existing customized AppData preferences were overwritten during import."
+    }
+
     $env:HYRULE_COOP_ROOT = $incompleteAppData
     $incomplete = Start-Process -FilePath (Join-Path $bootstrapRoot "HyruleCoop.exe") `
         -ArgumentList @("--headless", "--no-launch", "--offline", "--import-candidate",
@@ -145,11 +166,16 @@ try {
         "Save\global.sav",
         "Save\file1.sav",
         "migration-v1.json",
+        "preferences-migration-v1.json",
         "Launcher\current.txt"
     )) {
         if (-not (Test-Path -LiteralPath (Join-Path $appDataRoot $required))) {
             throw "Bootstrap/import smoke test is missing: $required"
         }
+    }
+    if ((Get-Content -LiteralPath (Join-Path $appDataRoot "UserData\shipofharkinian.json") -Raw) -ne
+        '{"legacy":true}') {
+        throw "Bootstrap/import did not replace the pristine default with migrated player preferences."
     }
 
     $protected = @(

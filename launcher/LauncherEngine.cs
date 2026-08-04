@@ -148,6 +148,7 @@ namespace HyruleCoop.Launcher {
                     }
                     ImportCandidate(candidate, null, true);
                 }
+                EnsureDefaultConfiguration();
                 LaunchOutcome outcome = Run(null);
                 if (!options.NoLaunch && outcome != null && outcome.GameExecutable != null) {
                     StartGame(outcome);
@@ -160,18 +161,23 @@ namespace HyruleCoop.Launcher {
         }
 
         public void RunFirstSetup(IWin32Window owner) {
-            EnsureDefaultConfiguration();
+            List<ExistingInstallation> candidates = options.SkipImport
+                ? new List<ExistingInstallation>()
+                : DiscoverExistingInstallations();
+            MigratePreferences(candidates);
+
             if (options.SkipImport || File.Exists(Path.Combine(rootPath, "migration-v1.json"))) {
+                EnsureDefaultConfiguration();
                 return;
             }
 
             if (File.Exists(Path.Combine(userDataRoot, "oot.o2r")) ||
                 File.Exists(Path.Combine(userDataRoot, "oot-mq.o2r"))) {
                 WriteMigrationMarker("existing AppData user data");
+                EnsureDefaultConfiguration();
                 return;
             }
 
-            List<ExistingInstallation> candidates = DiscoverExistingInstallations();
             using (SetupDialog dialog = new SetupDialog(candidates)) {
                 DialogResult result = dialog.ShowDialog(owner);
                 if (result == DialogResult.OK && dialog.SelectedInstallation != null) {
@@ -183,6 +189,7 @@ namespace HyruleCoop.Launcher {
                     Log("Initial asset import was deferred by the player.");
                 }
             }
+            EnsureDefaultConfiguration();
         }
 
         private void EnsureDefaultConfiguration() {
@@ -778,8 +785,7 @@ namespace HyruleCoop.Launcher {
             Log("Importing player data from " + candidate.Path);
             CopyIfMissing(Path.Combine(candidate.Path, "oot.o2r"), Path.Combine(userDataRoot, "oot.o2r"));
             CopyIfMissing(Path.Combine(candidate.Path, "oot-mq.o2r"), Path.Combine(userDataRoot, "oot-mq.o2r"));
-            CopyIfMissing(Path.Combine(candidate.Path, "shipofharkinian.json"),
-                          Path.Combine(userDataRoot, "shipofharkinian.json"));
+            ImportPreferencesIfSafe(Path.Combine(candidate.Path, "shipofharkinian.json"), candidate.Path);
             CopyDirectoryIfMissing(Path.Combine(candidate.Path, "mods"), Path.Combine(userDataRoot, "mods"));
             CopyDirectoryIfMissing(Path.Combine(candidate.Path, "Save"), Path.Combine(rootPath, "Save"));
 
@@ -926,6 +932,74 @@ namespace HyruleCoop.Launcher {
             marker["completedUtc"] = DateTime.UtcNow.ToString("o");
             marker["source"] = source;
             AtomicFile.WriteAllText(Path.Combine(rootPath, "migration-v1.json"), serializer.Serialize(marker));
+        }
+
+        private void MigratePreferences(List<ExistingInstallation> candidates) {
+            string markerPath = Path.Combine(rootPath, "preferences-migration-v1.json");
+            if (File.Exists(markerPath)) {
+                return;
+            }
+
+            ExistingInstallation newest = null;
+            DateTime newestWriteTime = DateTime.MinValue;
+            foreach (ExistingInstallation candidate in candidates) {
+                string source = Path.Combine(candidate.Path, "shipofharkinian.json");
+                if (!File.Exists(source)) {
+                    continue;
+                }
+                DateTime writeTime = File.GetLastWriteTimeUtc(source);
+                if (newest == null || writeTime > newestWriteTime) {
+                    newest = candidate;
+                    newestWriteTime = writeTime;
+                }
+            }
+
+            string destination = Path.Combine(userDataRoot, "shipofharkinian.json");
+            if (newest != null && ImportPreferencesIfSafe(
+                    Path.Combine(newest.Path, "shipofharkinian.json"), newest.Path)) {
+                return;
+            }
+            if (File.Exists(destination) && !IsBootstrapDefaultConfiguration(destination)) {
+                WritePreferenceMigrationMarker("existing AppData preferences", "preserved");
+            }
+        }
+
+        private bool ImportPreferencesIfSafe(string source, string sourceRoot) {
+            if (!File.Exists(source)) {
+                return false;
+            }
+
+            string destination = Path.Combine(userDataRoot, "shipofharkinian.json");
+            if (File.Exists(destination) && !IsBootstrapDefaultConfiguration(destination)) {
+                WritePreferenceMigrationMarker("existing AppData preferences", "preserved");
+                return false;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(destination));
+            File.Copy(source, destination, true);
+            WritePreferenceMigrationMarker(sourceRoot, "imported");
+            Log("Imported player preferences from " + source);
+            return true;
+        }
+
+        private bool IsBootstrapDefaultConfiguration(string path) {
+            if (!File.Exists(path) || String.IsNullOrWhiteSpace(options.BootstrapRoot)) {
+                return false;
+            }
+            string bootstrapDefault = Path.Combine(options.BootstrapRoot, "_bootstrap", "default-shipofharkinian.json");
+            return File.Exists(bootstrapDefault) &&
+                   String.Equals(Hashing.Sha256(path), Hashing.Sha256(bootstrapDefault),
+                                 StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void WritePreferenceMigrationMarker(string source, string action) {
+            Dictionary<string, object> marker = new Dictionary<string, object>();
+            marker["schemaVersion"] = 1;
+            marker["completedUtc"] = DateTime.UtcNow.ToString("o");
+            marker["source"] = source;
+            marker["action"] = action;
+            AtomicFile.WriteAllText(Path.Combine(rootPath, "preferences-migration-v1.json"),
+                                    serializer.Serialize(marker));
         }
 
         private static void CopyIfMissing(string source, string destination) {
