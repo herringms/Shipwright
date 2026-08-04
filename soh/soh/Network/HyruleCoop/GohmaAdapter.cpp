@@ -182,6 +182,10 @@ bool ApplyGohmaSnapshot(void* actorRef, const ActorSnapshotMessage& message) {
     actor->actor.speedXZ = message.speed;
     actor->actor.gravity = message.gravity;
     actor->actor.colChkInfo.health = static_cast<uint8_t>(std::max<int16_t>(0, message.health));
+    if (message.health <= 0) {
+        actor->actor.flags &= ~(ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE);
+        actor->collider.elements[0].info.bumperFlags &= ~BUMP_HIT;
+    }
     actor->skelanime.curFrame = message.animationFrame;
     actor->skelanime.playSpeed = message.animationSpeed;
     if (message.stateId > 0 && message.stateId < std::size(kActions)) {
@@ -246,6 +250,10 @@ bool DamageGohma(void* actorRef, void* playStateRef, int16_t damage) {
         BossGoma_SetupDefeated(actor, play);
         Enemy_StartFinishingBlow(play, &actor->actor);
         GameInteractor_ExecuteOnBossDefeat(&actor->actor);
+        Player* player = GET_PLAYER(play);
+        if (player->focusActor == &actor->actor) {
+            Player_ClearZTargeting(player);
+        }
     } else {
         actor->invincibilityFrames = 10;
     }

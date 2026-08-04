@@ -160,5 +160,42 @@ if ([string]::IsNullOrWhiteSpace($hostBuild) -or $hostBuild -ne $clientBuild -or
     throw "Hyrule Co-op localhost proof did not report one matching exact-build fingerprint."
 }
 
+$requiredHostEvidence = @(
+    'host\tdeku-baba-remote-target-visible\t',
+    'host\tdeku-baba-remote-swing-visible\t',
+    'host\tdeku-baba-remote-swing-rendered\t',
+    'host\tgohma-remote-movement-visible\t',
+    'host\tgohma-remote-target-visible\t',
+    'host\tgohma-remote-swing-visible\t',
+    'host\tgohma-remote-swing-rendered\t',
+    'host\tgohma-host-target-acquired\t',
+    'host\tgohma-host-damage-accepted\thit=1 health=1',
+    'host\tgohma-host-damage-accepted\thit=2 health=0',
+    'host\tgohma-host-target-released\t'
+)
+$requiredClientEvidence = @(
+    'client\tdeku-baba-target-acquired\t',
+    'client\tdeku-baba-sword-state-entered\t',
+    'client\tdeku-baba-physical-collision\t',
+    'client\tgohma-local-movement-verified\t',
+    'client\tgohma-target-acquired\t',
+    'client\tgohma-sword-state-entered\t',
+    'client\tgohma-physical-sword-collision\thit=1',
+    'client\tgohma-physical-sword-collision\thit=2',
+    'client\tgohma-first-damage-synchronized\thealth=2 -> health=1',
+    'client\tgohma-death-cleanup-visible\t',
+    'client\tgohma-post-death-attack-rejected\t'
+)
+foreach ($pattern in $requiredHostEvidence) {
+    if ($hostText -notmatch $pattern) {
+        throw "Hyrule Co-op localhost proof is missing host gameplay evidence: $pattern"
+    }
+}
+foreach ($pattern in $requiredClientEvidence) {
+    if ($clientText -notmatch $pattern) {
+        throw "Hyrule Co-op localhost proof is missing client gameplay evidence: $pattern"
+    }
+}
+
 Write-Host "Hyrule Co-op localhost proof: PASS"
 Write-Host "Exact build fingerprint: $hostBuild"

@@ -90,6 +90,8 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
                             : state->modelState;
     player->unk_85C = state->modelBlend;
     player->av1.actionVar1 = state->actionVariable;
+    player->linearVelocity = state->linearVelocity;
+    HyruleCoop::Manager::Instance->NotifyRemotePlayerPoseApplied(state->meleeWeaponState > 0);
 
     if (player->modelGroup != state->modelGroup) {
         const s32 originalAge = gSaveContext.linkAge;

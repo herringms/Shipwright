@@ -95,6 +95,10 @@ static void TestPlayerSnapshot() {
     player.modelState = -55;
     player.modelBlend = 0.75f;
     player.actionVariable = -8;
+    player.linearVelocity = 4.5f;
+    player.focusActorId = 27;
+    player.meleeWeaponState = 1;
+    player.meleeWeaponAnimation = 12;
 
     const auto decoded = DecodePlayerSnapshot(EncodePlayerSnapshot(player));
     assert(decoded.has_value());
@@ -111,6 +115,10 @@ static void TestPlayerSnapshot() {
     assert(decoded->itemAction == player.itemAction);
     assert(decoded->modelBlend == player.modelBlend);
     assert(decoded->actionVariable == player.actionVariable);
+    assert(decoded->linearVelocity == player.linearVelocity);
+    assert(decoded->focusActorId == player.focusActorId);
+    assert(decoded->meleeWeaponState == player.meleeWeaponState);
+    assert(decoded->meleeWeaponAnimation == player.meleeWeaponAnimation);
 
     std::vector<uint8_t> truncated = EncodePlayerSnapshot(player);
     truncated.pop_back();
@@ -262,6 +270,8 @@ static void TestCoordinationMessages() {
     progression.shared.isDoubleDefenseAcquired = 1;
     progression.shared.bgsFlag = 1;
     progression.shared.gsTokens = 77;
+    progression.shared.eventChkInf[3] = 0x0208;
+    progression.shared.eventChkInf[13] = 0x0040;
     const auto decodedProgression = DecodeProgressionSnapshot(EncodeProgressionSnapshot(progression));
     assert(decodedProgression.has_value());
     assert(decodedProgression->revision == 7);
@@ -288,6 +298,18 @@ static void TestCoordinationMessages() {
     assert(decodedProgressionIntent->itemId == 0x0A);
     assert(decodedProgressionIntent->mapIndex == 3);
     assert(decodedProgressionIntent->remainingDungeonKeys == 4);
+
+    progressionIntent.kind = ProgressionIntentKind::GlobalFlagChanged;
+    progressionIntent.flagType = 5;
+    progressionIntent.flag = 0x33;
+    progressionIntent.set = true;
+    const auto decodedGlobalFlagIntent =
+        DecodeProgressionIntent(EncodeProgressionIntent(progressionIntent));
+    assert(decodedGlobalFlagIntent.has_value());
+    assert(decodedGlobalFlagIntent->kind == ProgressionIntentKind::GlobalFlagChanged);
+    assert(decodedGlobalFlagIntent->flagType == 5);
+    assert(decodedGlobalFlagIntent->flag == 0x33);
+    assert(decodedGlobalFlagIntent->set);
 }
 
 static void TestInvalidPacket() {

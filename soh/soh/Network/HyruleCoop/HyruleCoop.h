@@ -41,6 +41,7 @@ class Manager {
     void SanitizeSaveCopy(void* saveContext) const;
     void PrepareRemotePlayer(void* actor);
     void NotifyRemotePlayerDestroyed(void* actor);
+    void NotifyRemotePlayerPoseApplied(bool meleeActive);
 
   private:
     void RegisterHooks(bool enabled);
@@ -76,6 +77,7 @@ class Manager {
     void SendProgressionSnapshot();
     void SendProgressionItemIntent(uint16_t itemId, uint16_t modIndex, uint16_t mapIndex);
     void SendDungeonKeyIntent(uint16_t mapIndex);
+    void SendGlobalFlagIntent(int16_t flagType, int16_t flag, bool set);
     void SendDekuBabaSnapshot(void* actor, bool alive);
     void SendGohmaSnapshot(void* actor, bool alive);
     void UpdateDekuBaba(void* actor);
@@ -85,6 +87,7 @@ class Manager {
     void ApplyGohmaAuthority(void* actor, bool* shouldUpdate);
     void ForgetGohma(void* actor);
     void CompleteGohma(void* actor);
+    void InjectAutomatedTestInput(void* actor, bool* shouldUpdate);
     void RefreshRemotePlayer();
     void DestroyRemotePlayer();
     void BeginReconnectBarrier();
@@ -100,6 +103,8 @@ class Manager {
     bool SpawnAutomatedTestDekuBaba();
     void CaptureCanonicalProgression();
     void ApplyCanonicalProgression(const SharedProgressionState& state);
+    void ReconcileKingZora(void* actor);
+    void ReconcileZorasFountainBombableWall(void* actor);
     bool IsCurrentScope(const SessionScope& candidate) const;
     bool IsSaveLoaded() const;
 
@@ -121,6 +126,8 @@ class Manager {
     uint64_t guestTokenLow = 0;
     CapabilityList negotiatedCapabilities;
     std::optional<PlayerSnapshotMessage> remotePlayerSnapshot;
+    uint32_t lastRemoteMeleeTick = 0;
+    int16_t lastRemoteMeleeScene = -1;
     void* remotePlayer = nullptr;
     bool preparingRemotePlayer = false;
     bool applyingAuthoritativeState = false;
@@ -146,6 +153,7 @@ class Manager {
     SharedProgressionState canonicalProgression;
     bool canonicalProgressionCaptured = false;
     std::unordered_set<uint64_t> pendingGuestAttacks;
+    std::unordered_map<uint64_t, uint32_t> lastGuestAttackTick;
     std::unordered_map<uint64_t, void*> localDekuBabas;
     std::unordered_map<uint64_t, void*> localGohmas;
     std::unordered_map<uint64_t, ActorSnapshotMessage> actorSnapshots;
@@ -156,8 +164,31 @@ class Manager {
     bool automatedTestActorSpawned = false;
     bool automatedTestReconnectStarted = false;
     bool automatedTestProgressionTriggered = false;
+    bool automatedTestWorldStateTriggered = false;
     bool automatedTestBossPrepared = false;
     bool automatedTestBossCompleted = false;
+    bool automatedTestMovementObserved = false;
+    bool automatedTestRemoteMovementObserved = false;
+    bool automatedTestTargetObserved = false;
+    bool automatedTestRemoteTargetObserved = false;
+    bool automatedTestSwingObserved = false;
+    bool automatedTestRemoteSwingObserved = false;
+    bool automatedTestRemoteSwingRendered = false;
+    bool automatedTestFirstDamageObserved = false;
+    bool automatedTestPostDeathCleanupObserved = false;
+    uint8_t automatedTestCombatPhase = 0;
+    uint32_t automatedTestCombatPhaseTick = 0;
+    uint32_t automatedTestPhysicalHits = 0;
+    uint32_t automatedTestAcceptedBossHits = 0;
+    int16_t automatedTestLastObservedHealth = -1;
+    uint32_t automatedTestInputButtons = 0;
+    int8_t automatedTestInputStickX = 0;
+    int8_t automatedTestInputStickY = 0;
+    uint64_t automatedTestTargetEntityId = 0;
+    void* automatedTestTargetActor = nullptr;
+    float automatedTestMovementOrigin[3] = {};
+    float automatedTestRemotePreviousPosition[3] = {};
+    uint32_t automatedTestRemotePreviousTick = 0;
     uint8_t automatedTestStage = 0;
     uint64_t automatedTestTick = 0;
     uint64_t automatedTestStageTick = 0;

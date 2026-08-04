@@ -334,6 +334,10 @@ std::vector<uint8_t> EncodePlayerSnapshot(const PlayerSnapshotMessage& message) 
     writer.WriteU16(static_cast<uint16_t>(message.modelState));
     writer.WriteF32(message.modelBlend);
     writer.WriteU8(static_cast<uint8_t>(message.actionVariable));
+    writer.WriteF32(message.linearVelocity);
+    writer.WriteU16(static_cast<uint16_t>(message.focusActorId));
+    writer.WriteU8(static_cast<uint8_t>(message.meleeWeaponState));
+    writer.WriteU8(static_cast<uint8_t>(message.meleeWeaponAnimation));
     return writer.Data();
 }
 
@@ -425,6 +429,18 @@ std::optional<PlayerSnapshotMessage> DecodePlayerSnapshot(const std::vector<uint
         return std::nullopt;
     }
     message.actionVariable = static_cast<int8_t>(signed8);
+    if (!reader.ReadF32(message.linearVelocity) || !reader.ReadU16(signed16)) {
+        return std::nullopt;
+    }
+    message.focusActorId = static_cast<int16_t>(signed16);
+    if (!reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.meleeWeaponState = static_cast<int8_t>(signed8);
+    if (!reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.meleeWeaponAnimation = static_cast<int8_t>(signed8);
     return reader.AtEnd() ? std::optional<PlayerSnapshotMessage>(message) : std::nullopt;
 }
 
@@ -858,6 +874,9 @@ std::vector<uint8_t> EncodeProgressionSnapshot(const ProgressionSnapshotMessage&
     writer.WriteU8(message.shared.isDoubleDefenseAcquired);
     writer.WriteU8(message.shared.bgsFlag);
     writer.WriteU16(static_cast<uint16_t>(message.shared.gsTokens));
+    for (uint16_t flags : message.shared.eventChkInf) {
+        writer.WriteU16(flags);
+    }
     return writer.Data();
 }
 
@@ -923,6 +942,11 @@ std::optional<ProgressionSnapshotMessage> DecodeProgressionSnapshot(const std::v
         return std::nullopt;
     }
     message.shared.gsTokens = static_cast<int16_t>(signedValue);
+    for (uint16_t& flags : message.shared.eventChkInf) {
+        if (!reader.ReadU16(flags)) {
+            return std::nullopt;
+        }
+    }
     return reader.AtEnd() ? std::optional<ProgressionSnapshotMessage>(message) : std::nullopt;
 }
 
@@ -936,6 +960,9 @@ std::vector<uint8_t> EncodeProgressionIntent(const ProgressionIntentMessage& mes
     writer.WriteU16(message.modIndex);
     writer.WriteU16(message.mapIndex);
     writer.WriteU8(static_cast<uint8_t>(message.remainingDungeonKeys));
+    writer.WriteU16(static_cast<uint16_t>(message.flagType));
+    writer.WriteU16(static_cast<uint16_t>(message.flag));
+    writer.WriteU8(message.set ? 1 : 0);
     return writer.Data();
 }
 
@@ -944,14 +971,22 @@ std::optional<ProgressionIntentMessage> DecodeProgressionIntent(const std::vecto
     ProgressionIntentMessage message;
     uint8_t kind = 0;
     uint8_t remainingKeys = 0;
+    uint16_t signedValue = 0;
+    uint8_t set = 0;
     if (!ReadScope(reader, message.scope) || !reader.ReadU64(message.participantId) ||
         !reader.ReadU64(message.requestId) || !reader.ReadU8(kind) || !reader.ReadU16(message.itemId) ||
         !reader.ReadU16(message.modIndex) || !reader.ReadU16(message.mapIndex) ||
-        !reader.ReadU8(remainingKeys) || !reader.AtEnd()) {
+        !reader.ReadU8(remainingKeys) || !reader.ReadU16(signedValue)) {
         return std::nullopt;
     }
+    message.flagType = static_cast<int16_t>(signedValue);
+    if (!reader.ReadU16(signedValue) || !reader.ReadU8(set) || set > 1 || !reader.AtEnd()) {
+        return std::nullopt;
+    }
+    message.flag = static_cast<int16_t>(signedValue);
+    message.set = set != 0;
     if (kind < static_cast<uint8_t>(ProgressionIntentKind::ItemReceived) ||
-        kind > static_cast<uint8_t>(ProgressionIntentKind::DungeonKeyUsed)) {
+        kind > static_cast<uint8_t>(ProgressionIntentKind::GlobalFlagChanged)) {
         return std::nullopt;
     }
     message.kind = static_cast<ProgressionIntentKind>(kind);

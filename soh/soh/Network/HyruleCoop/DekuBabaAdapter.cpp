@@ -215,4 +215,14 @@ bool DamageDekuBaba(void* actorRef, int16_t damage) {
     return true;
 }
 
+void RegisterDekuBabaGuestCollision(void* actorRef, void* playStateRef) {
+    EnDekubaba* actor = static_cast<EnDekubaba*>(actorRef);
+    PlayState* play = static_cast<PlayState*>(playStateRef);
+    if (play == nullptr || actor->actor.colChkInfo.health == 0) {
+        return;
+    }
+    CollisionCheck_SetAC(play, &play->colChkCtx, &actor->collider.base);
+    CollisionCheck_SetOC(play, &play->colChkCtx, &actor->collider.base);
+}
+
 } // namespace HyruleCoop

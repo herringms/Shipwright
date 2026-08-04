@@ -12,5 +12,6 @@ ActorSnapshotMessage CaptureDekuBabaSnapshot(void* actor, int16_t scene, uint32_
 bool ApplyDekuBabaSnapshot(void* actor, const ActorSnapshotMessage& snapshot);
 bool ConsumeDekuBabaHit(void* actor);
 bool DamageDekuBaba(void* actor, int16_t damage);
+void RegisterDekuBabaGuestCollision(void* actor, void* playState);
 
 } // namespace HyruleCoop

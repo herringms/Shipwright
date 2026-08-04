@@ -8,6 +8,7 @@ namespace HyruleCoop {
 
 SharedProgressionState CaptureSharedProgression(void* saveContext);
 void ApplySharedProgression(void* saveContext, const SharedProgressionState& state);
+void ReconcileSharedProgressionDerivedFlags(void* saveContext);
 bool IsSharedProgressionItem(uint16_t itemId, uint16_t modIndex, uint8_t category);
 
 } // namespace HyruleCoop

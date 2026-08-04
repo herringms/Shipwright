@@ -79,10 +79,11 @@ bool DirectSession::Send(MessageType type, const std::vector<uint8_t>& payload, 
     Packet packet{ type, nextSequence.fetch_add(1), payload, streamId };
     std::lock_guard<std::mutex> lock(outgoingMutex);
     if (IsReplaceableSnapshot(type)) {
-        for (auto iterator = outgoing.rbegin(); iterator != outgoing.rend(); ++iterator) {
+        for (auto iterator = outgoing.begin(); iterator != outgoing.end(); ++iterator) {
             if (iterator->type == type && iterator->streamId == streamId) {
-                iterator->bytes = EncodePacket(packet);
-                return true;
+                // This packet has a newer sequence number, so preserve wire ordering by moving it to the tail.
+                outgoing.erase(iterator);
+                break;
             }
         }
     }

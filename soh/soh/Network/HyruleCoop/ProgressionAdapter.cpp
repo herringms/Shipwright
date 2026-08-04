@@ -30,6 +30,20 @@ uint8_t DurableMagicLevel(const SharedProgressionState& state) {
     return state.isMagicAcquired ? 1 : 0;
 }
 
+void ReconcileSpellAcquisitionFlags(SaveContext* saveContext) {
+    uint16_t& spellFlags = saveContext->itemGetInf[ITEMGETINF_18_19_1A_INDEX];
+    spellFlags &= ~(ITEMGETINF_18_MASK | ITEMGETINF_19_MASK | ITEMGETINF_1A_MASK);
+    if (saveContext->inventory.items[SLOT_FARORES_WIND] == ITEM_FARORES_WIND) {
+        spellFlags |= ITEMGETINF_18_MASK;
+    }
+    if (saveContext->inventory.items[SLOT_DINS_FIRE] == ITEM_DINS_FIRE) {
+        spellFlags |= ITEMGETINF_19_MASK;
+    }
+    if (saveContext->inventory.items[SLOT_NAYRUS_LOVE] == ITEM_NAYRUS_LOVE) {
+        spellFlags |= ITEMGETINF_1A_MASK;
+    }
+}
+
 } // namespace
 
 SharedProgressionState CaptureSharedProgression(void* saveContextRef) {
@@ -66,6 +80,8 @@ SharedProgressionState CaptureSharedProgression(void* saveContextRef) {
     state.isDoubleDefenseAcquired = saveContext->isDoubleDefenseAcquired;
     state.bgsFlag = saveContext->bgsFlag;
     state.gsTokens = saveContext->inventory.gsTokens;
+    std::copy(std::begin(saveContext->eventChkInf), std::end(saveContext->eventChkInf),
+              state.eventChkInf.begin());
     return state;
 }
 
@@ -137,6 +153,15 @@ void ApplySharedProgression(void* saveContextRef, const SharedProgressionState& 
     saveContext->isDoubleDefenseAcquired = state.isDoubleDefenseAcquired;
     saveContext->bgsFlag = state.bgsFlag;
     saveContext->inventory.gsTokens = state.gsTokens;
+    std::copy(state.eventChkInf.begin(), state.eventChkInf.end(), std::begin(saveContext->eventChkInf));
+    ReconcileSpellAcquisitionFlags(saveContext);
+}
+
+void ReconcileSharedProgressionDerivedFlags(void* saveContextRef) {
+    SaveContext* saveContext = static_cast<SaveContext*>(saveContextRef);
+    if (saveContext != nullptr) {
+        ReconcileSpellAcquisitionFlags(saveContext);
+    }
 }
 
 bool IsSharedProgressionItem(uint16_t itemId, uint16_t modIndex, uint8_t category) {

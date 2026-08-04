@@ -12,7 +12,7 @@
 namespace HyruleCoop {
 
 constexpr uint32_t kPacketMagic = 0x48434F50; // HCOP
-constexpr uint16_t kProtocolVersion = 3;
+constexpr uint16_t kProtocolVersion = 4;
 constexpr size_t kHeaderSize = 24;
 constexpr uint32_t kMaximumPayloadSize = 1024 * 1024;
 constexpr size_t kMaximumActorAdapterWords = 64;
@@ -146,6 +146,10 @@ struct PlayerSnapshotMessage {
     int16_t modelState = 0;
     float modelBlend = 0.0f;
     int8_t actionVariable = 0;
+    float linearVelocity = 0.0f;
+    int16_t focusActorId = -1;
+    int8_t meleeWeaponState = 0;
+    int8_t meleeWeaponAnimation = 0;
 };
 
 struct CycleSnapshotMessage {
@@ -255,6 +259,7 @@ struct CollectedLocation {
 enum class ProgressionIntentKind : uint8_t {
     ItemReceived = 1,
     DungeonKeyUsed = 2,
+    GlobalFlagChanged = 3,
 };
 
 struct SharedProgressionState {
@@ -273,6 +278,7 @@ struct SharedProgressionState {
     uint8_t isDoubleDefenseAcquired = 0;
     uint8_t bgsFlag = 0;
     int16_t gsTokens = 0;
+    std::array<uint16_t, 14> eventChkInf = {};
 
     bool operator==(const SharedProgressionState&) const = default;
 };
@@ -286,6 +292,9 @@ struct ProgressionIntentMessage {
     uint16_t modIndex = 0;
     uint16_t mapIndex = 0;
     int8_t remainingDungeonKeys = 0;
+    int16_t flagType = 0;
+    int16_t flag = 0;
+    bool set = true;
 };
 
 struct ProgressionSnapshotMessage {
