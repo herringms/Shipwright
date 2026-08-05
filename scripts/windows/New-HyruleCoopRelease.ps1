@@ -58,6 +58,12 @@ $launcherBuild = Join-Path $repoRoot "build-poc-mingw\launcher"
 & (Join-Path $PSScriptRoot "Build-HyruleCoopLauncher.ps1") -OutputDirectory $launcherBuild
 $bootstrapExecutable = Join-Path $launcherBuild "HyruleCoop.exe"
 $launcherExecutable = Join-Path $launcherBuild "HyruleCoopLauncher.exe"
+$launcherFileVersion = (Get-Item -LiteralPath $launcherExecutable).VersionInfo.FileVersion
+$launcherVersionParts = @($launcherFileVersion.Split('.'))
+if ($launcherVersionParts.Count -lt 3) {
+    throw "The Hyrule Co-op launcher has an invalid file version: $launcherFileVersion"
+}
+$launcherVersion = ($launcherVersionParts[0..2] -join '.')
 
 $runtimeDependencies = @(
     "gamecontrollerdb.txt",
@@ -147,6 +153,9 @@ $launcherHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $launcherExecutable
 $launcherAssetName = "HyruleCoopLauncher.exe"
 $launcherAsset = Join-Path $OutputDirectory $launcherAssetName
 Copy-Item -LiteralPath $launcherExecutable -Destination $launcherAsset -Force
+$bootstrapAssetName = "HyruleCoop.exe"
+$bootstrapAsset = Join-Path $OutputDirectory $bootstrapAssetName
+Copy-Item -LiteralPath $bootstrapExecutable -Destination $bootstrapAsset -Force
 
 $releaseBaseUrl = "https://github.com/$GitHubRepository/releases/download/$ReleaseTag"
 $manifest = [ordered]@{
@@ -158,7 +167,7 @@ $manifest = [ordered]@{
     compatibilityId = "hyrule-coop-poc.3"
     assetSchema = $AssetSchema
     minimumLauncherVersion = "1.0.0"
-    launcherVersion = "1.0.0"
+    launcherVersion = $launcherVersion
     launcherUrl = "$releaseBaseUrl/$launcherAssetName"
     launcherSha256 = $launcherHash
     runtimeUrl = "$releaseBaseUrl/$runtimeArchiveName"
@@ -228,7 +237,7 @@ try {
     $archive.Dispose()
 }
 
-foreach ($artifact in @($runtimeArchive, $launcherAsset, $manifestPath, $bootstrapArchive)) {
+foreach ($artifact in @($runtimeArchive, $launcherAsset, $bootstrapAsset, $manifestPath, $bootstrapArchive)) {
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $artifact).Hash
     "$hash *$([IO.Path]::GetFileName($artifact))" |
         Set-Content -LiteralPath ($artifact + ".sha256") -Encoding ASCII
@@ -236,5 +245,6 @@ foreach ($artifact in @($runtimeArchive, $launcherAsset, $manifestPath, $bootstr
 
 Write-Host "Created GitHub release assets in: $OutputDirectory"
 Write-Host "Bootstrap ZIP: $bootstrapArchive"
+Write-Host "Standalone bootstrap: $bootstrapAsset"
 Write-Host "Runtime ZIP: $runtimeArchive"
 Write-Host "Channel manifest: $manifestPath"

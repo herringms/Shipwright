@@ -13,13 +13,14 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Updates and launches Hyrule Co-op")]
 [assembly: AssemblyCompany("Hyrule Co-op contributors")]
 [assembly: AssemblyProduct("Hyrule Co-op")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 namespace HyruleCoop.Launcher {
     internal sealed class LauncherOptions {
         public string RootPath;
         public string BootstrapRoot;
+        public string BootstrapPayloadRoot;
         public string ManifestOverride;
         public string ImportCandidate;
         public bool Delegated;
@@ -41,6 +42,8 @@ namespace HyruleCoop.Launcher {
                     options.RootPath = args[++i];
                 } else if (value == "--bootstrap-root" && i + 1 < args.Length) {
                     options.BootstrapRoot = args[++i];
+                } else if (value == "--bootstrap-payload-root" && i + 1 < args.Length) {
+                    options.BootstrapPayloadRoot = args[++i];
                 } else if (value == "--manifest" && i + 1 < args.Length) {
                     options.ManifestOverride = args[++i];
                 } else if (value == "--import-candidate" && i + 1 < args.Length) {
@@ -67,6 +70,9 @@ namespace HyruleCoop.Launcher {
             options.RootPath = Path.GetFullPath(options.RootPath);
             if (!String.IsNullOrWhiteSpace(options.BootstrapRoot)) {
                 options.BootstrapRoot = Path.GetFullPath(options.BootstrapRoot);
+            }
+            if (!String.IsNullOrWhiteSpace(options.BootstrapPayloadRoot)) {
+                options.BootstrapPayloadRoot = Path.GetFullPath(options.BootstrapPayloadRoot);
             }
             return options;
         }
@@ -123,7 +129,7 @@ namespace HyruleCoop.Launcher {
     }
 
     internal static class Program {
-        public const string LauncherVersion = "1.0.0";
+        public const string LauncherVersion = "1.1.0";
 
         [STAThread]
         private static int Main(string[] args) {

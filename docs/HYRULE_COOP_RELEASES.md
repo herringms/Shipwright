@@ -2,8 +2,9 @@
 
 ## Client model
 
-`HyruleCoop.exe` is the immutable bootstrap players retain. It delegates to the current launcher under
-`%LOCALAPPDATA%\HyruleCoop\Launcher`. The launcher downloads only published GitHub Release assets, validates the
+`HyruleCoop.exe` is the immutable bootstrap players retain. On first run it installs its embedded launcher and default
+configuration under `%LOCALAPPDATA%\HyruleCoop`, without writing beside the downloaded EXE. It then delegates to the
+current launcher under `%LOCALAPPDATA%\HyruleCoop\Launcher`. The launcher downloads only published GitHub Release assets, validates the
 runtime ZIP and each managed file, stages a new version under `Runtime`, and atomically switches
 `current-runtime.txt` after validation. A failed update retains the current runtime; a later integrity failure on the
 selected runtime automatically restores the previous verified version.
@@ -34,14 +35,16 @@ Create a release after the game build and localhost verification pass:
 
 The output directory contains:
 
+- `HyruleCoop.exe`
 - `Hyrule-Coop-Runtime-Windows-x64-<version>.zip`
 - `HyruleCoopLauncher.exe`
 - `hyrule-coop-release.json`
 - `Hyrule-Coop-Bootstrap-<version>-Windows.zip`
 - SHA-256 sidecars for every published asset
 
-Upload the runtime, launcher, and fixed-name manifest to the GitHub Release whose tag matches `ReleaseId`. Give a
-new player only the bootstrap ZIP. Existing players receive the same runtime through the launcher. The stable
+Upload the standalone bootstrap, runtime, launcher, and fixed-name manifest to the GitHub Release whose tag matches
+`ReleaseId`. Give a new player the fixed-name `HyruleCoop.exe`; the bootstrap ZIP remains an offline/recovery package.
+Existing players receive the same runtime through the launcher. The stable
 channel release must not be marked as a draft or prerelease because GitHub's `/releases/latest` endpoint excludes
 both.
 
@@ -57,6 +60,12 @@ Before publishing:
 6. Confirm the ZIP audits contain no ROM, generated O2R, save, personal config, mods, or logs.
 7. Test the bootstrap in a clean folder and test an update from the previous published release.
 8. Publish only after both the runtime and launcher SHA-256 values match the generated sidecars.
+
+The permanent new-player download URL is:
+
+```text
+https://github.com/herringms/Shipwright/releases/latest/download/HyruleCoop.exe
+```
 
 The manual PowerShell update package remains a recovery path. It is not the normal player workflow.
 

@@ -3,7 +3,7 @@ Hyrule Co-op Proof of Concept 2 - Windows
 This package contains the same Shipwright executable and support files for both players. Its minimal configuration
 selects the verified OpenGL renderer; Shipwright fills in normal controller and preference defaults on first launch.
 
-Players normally start HyruleCoop.exe from the bootstrap package, not soh.exe in this runtime directory. The
+Players normally start their downloaded HyruleCoop.exe, not soh.exe in this runtime directory. The
 launcher installs and verifies this complete runtime under %LOCALAPPDATA%\HyruleCoop\Runtime, then starts it with
 %LOCALAPPDATA%\HyruleCoop\UserData as the working directory.
 

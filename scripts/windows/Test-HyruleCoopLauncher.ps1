@@ -24,10 +24,15 @@ if (Test-Path -LiteralPath $testRoot) {
 
 $bootstrapRoot = Join-Path $testRoot "Hyrule Co-op Bootstrap"
 $bootstrapPayload = Join-Path $bootstrapRoot "_bootstrap"
+$standaloneRoot = Join-Path $testRoot "Standalone Download"
+$standaloneReleaseRoot = Join-Path $testRoot "Standalone Release"
+$standaloneAppData = Join-Path $testRoot "Standalone App Data\HyruleCoop"
 $legacyRoot = Join-Path $testRoot "Legacy Shipwright"
 $appDataRoot = Join-Path $testRoot "App Data\HyruleCoop"
-New-Item -ItemType Directory -Path $bootstrapPayload, $legacyRoot, $appDataRoot -Force | Out-Null
+New-Item -ItemType Directory -Path $bootstrapPayload, $standaloneRoot, $standaloneReleaseRoot,
+    $legacyRoot, $appDataRoot -Force | Out-Null
 Copy-Item -LiteralPath $bootstrapExe -Destination (Join-Path $bootstrapRoot "HyruleCoop.exe")
+Copy-Item -LiteralPath $bootstrapExe -Destination (Join-Path $standaloneRoot "HyruleCoop.exe")
 Copy-Item -LiteralPath $launcherExe -Destination (Join-Path $bootstrapPayload "HyruleCoopLauncher.exe")
 [IO.File]::WriteAllText((Join-Path $bootstrapPayload "default-shipofharkinian.json"), '{"default":true}')
 [IO.Directory]::CreateDirectory((Join-Path $appDataRoot "UserData")) | Out-Null
@@ -75,7 +80,7 @@ function New-TestRelease {
         compatibilityId = "hyrule-coop-poc.3"
         assetSchema = $AssetSchema
         minimumLauncherVersion = "1.0.0"
-        launcherVersion = "1.0.0"
+        launcherVersion = "1.1.0"
         launcherUrl = ""
         launcherSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $launcherExe).Hash
         runtimeUrl = $(if ($Bootstrap) { "" } else { $archivePath })
@@ -103,6 +108,11 @@ $release1 = New-TestRelease -ReleaseId "launcher-smoke-1" -Version "1.0.0" -Cont
     -Destination $bootstrapPayload -Bootstrap
 $release1.Manifest | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath (Join-Path $bootstrapPayload "hyrule-coop-release.json") -Encoding UTF8
+$standaloneRelease = New-TestRelease -ReleaseId "launcher-standalone-1" -Version "1.0.0" -Content "standalone" `
+    -Destination $standaloneReleaseRoot
+$standaloneManifest = Join-Path $standaloneReleaseRoot "hyrule-coop-release.json"
+$standaloneRelease.Manifest | ConvertTo-Json -Depth 6 |
+    Set-Content -LiteralPath $standaloneManifest -Encoding UTF8
 
 $saveOnlyRoot = Join-Path $testRoot "Legacy Saves Only"
 $incompleteAppData = Join-Path $testRoot "Incomplete App Data\HyruleCoop"
@@ -114,8 +124,36 @@ New-Item -ItemType Directory -Path (Join-Path $saveOnlyRoot "Save"), $incomplete
 [IO.File]::WriteAllText((Join-Path $customAppData "UserData\shipofharkinian.json"), '{"custom":true}')
 
 $oldRoot = $env:HYRULE_COOP_ROOT
+$oldManifestUrl = $env:HYRULE_COOP_UPDATE_MANIFEST_URL
 try {
+    $env:HYRULE_COOP_ROOT = $standaloneAppData
+    $env:HYRULE_COOP_UPDATE_MANIFEST_URL = $standaloneManifest
+    $standalone = Start-Process -FilePath (Join-Path $standaloneRoot "HyruleCoop.exe") `
+        -ArgumentList @("--headless", "--no-launch", "--skip-import") `
+        -WorkingDirectory $standaloneRoot -PassThru
+    $standalone.WaitForExit(30000) | Out-Null
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline -and
+        -not (Test-Path -LiteralPath (Join-Path $standaloneAppData "current-runtime.txt"))) {
+        Start-Sleep -Milliseconds 200
+    }
+    $standalonePointer = Join-Path $standaloneAppData "Launcher\current.txt"
+    if (-not (Test-Path -LiteralPath $standalonePointer) -or
+        -not (Test-Path -LiteralPath (Join-Path $standaloneAppData "UserData\shipofharkinian.json")) -or
+        (Get-Content -LiteralPath (Join-Path $standaloneAppData "current-runtime.txt") -Raw).Trim() -ne
+            "launcher-standalone-1") {
+        throw "The standalone HyruleCoop.exe did not install its launcher, default configuration, and runtime."
+    }
+    $installedLauncher = [IO.Path]::GetFullPath((Get-Content -LiteralPath $standalonePointer -Raw).Trim())
+    $standaloneLauncherRoot = [IO.Path]::GetFullPath((Join-Path $standaloneAppData "Launcher")) + '\'
+    if (-not $installedLauncher.StartsWith($standaloneLauncherRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $installedLauncher) -or
+        @(Get-ChildItem -LiteralPath $standaloneRoot -Force).Count -ne 1) {
+        throw "The standalone bootstrap wrote outside AppData or modified its download folder."
+    }
+
     $env:HYRULE_COOP_ROOT = $customAppData
+    $env:HYRULE_COOP_UPDATE_MANIFEST_URL = $oldManifestUrl
     $customized = Start-Process -FilePath (Join-Path $bootstrapRoot "HyruleCoop.exe") `
         -ArgumentList @("--headless", "--no-launch", "--offline", "--import-candidate",
             ('"' + $legacyRoot + '"')) -WorkingDirectory $bootstrapRoot -PassThru
@@ -221,7 +259,7 @@ try {
         throw "Unsafe launcher version metadata escaped its versioned launcher directory."
     }
 
-    $release2.Manifest.launcherVersion = "1.0.0"
+    $release2.Manifest.launcherVersion = "1.1.0"
     $release2.Manifest.launcherUrl = ""
     $release2.Manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $release2Manifest -Encoding UTF8
 
@@ -275,7 +313,8 @@ try {
         ('"' + $appDataRoot + '"'), "--bootstrap-root", ('"' + $bootstrapRoot + '"'), "--offline")
 } finally {
     $env:HYRULE_COOP_ROOT = $oldRoot
+    $env:HYRULE_COOP_UPDATE_MANIFEST_URL = $oldManifestUrl
 }
 
 Write-Host "Hyrule Co-op launcher smoke test passed."
-Write-Host "Verified bootstrap delegation, conservative import, update, preservation, rollback, and offline launch."
+Write-Host "Verified single-EXE setup, bootstrap delegation, conservative import, update, preservation, rollback, and offline launch."

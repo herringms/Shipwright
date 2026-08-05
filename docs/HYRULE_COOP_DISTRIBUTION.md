@@ -6,8 +6,9 @@ Hyrule Co-op stores Windows saves under `%LOCALAPPDATA%\HyruleCoop\Save`, indepe
 Save slots are `file*.sav`; `global.sav` contains global metadata. The first compatible launch can copy saves from a
 nearby legacy portable installation into that location without deleting the originals.
 
-Each player downloads the Hyrule Co-op ZIP once, chooses **Extract All**, and runs `HyruleCoop.exe` from the extracted
-folder. Each player supplies a supported ROM or imports an existing locally generated `oot.o2r`. ROMs, generated O2R
+Each player downloads `HyruleCoop.exe` once and runs it from a normal folder. It installs the launcher under AppData
+and downloads the verified current runtime. The complete bootstrap ZIP remains available for offline recovery. Each
+player supplies a supported ROM or imports an existing locally generated `oot.o2r`. ROMs, generated O2R
 archives, mods, logs, and `shipofharkinian.json` live under
 `%LOCALAPPDATA%\HyruleCoop\UserData`; saves live under `%LOCALAPPDATA%\HyruleCoop\Save`. They are never part of a
 published runtime. Do not distribute a ROM, generated O2R archive, or another player's saves.

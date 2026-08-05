@@ -1,7 +1,9 @@
 Hyrule Co-op for Windows
 
-Download the Hyrule Co-op ZIP, right-click it, choose Extract All, and open the resulting folder. Double-click
-HyruleCoop.exe to play. Do not start soh.exe from a Runtime folder.
+Download HyruleCoop.exe to a normal folder and double-click it to play. Do not start soh.exe from a Runtime folder.
+
+HyruleCoop.exe contains the small installer needed for first launch. It writes launcher and game files only under
+%LOCALAPPDATA%\HyruleCoop; it does not add files beside itself.
 
 The first launch installs the bundled, verified game runtime under:
 %LOCALAPPDATA%\HyruleCoop\Runtime

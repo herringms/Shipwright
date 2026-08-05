@@ -2,8 +2,8 @@
     "ConfigVersion": 7,
     "Window": {
         "Backend": {
-            "Id": 2,
-            "Name": "OpenGL"
+            "Id": 1,
+            "Name": "DirectX 11"
         },
         "Fullscreen": {
             "Enabled": false

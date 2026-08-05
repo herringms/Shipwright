@@ -6,6 +6,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -118,6 +119,7 @@ namespace HyruleCoop.Launcher {
         private readonly string rootPath;
         private readonly string runtimeRoot;
         private readonly string launcherRoot;
+        private readonly string bootstrapPayloadRoot;
         private readonly string userDataRoot;
         private readonly string updateRoot;
         private readonly string logPath;
@@ -132,6 +134,9 @@ namespace HyruleCoop.Launcher {
             rootPath = options.RootPath;
             runtimeRoot = Path.Combine(rootPath, "Runtime");
             launcherRoot = Path.Combine(rootPath, "Launcher");
+            bootstrapPayloadRoot = String.IsNullOrWhiteSpace(options.BootstrapPayloadRoot)
+                ? options.BootstrapRoot
+                : options.BootstrapPayloadRoot;
             userDataRoot = Path.Combine(rootPath, "UserData");
             updateRoot = Path.Combine(rootPath, "Updates");
             logPath = Path.Combine(launcherRoot, "launcher.log");
@@ -194,11 +199,13 @@ namespace HyruleCoop.Launcher {
 
         private void EnsureDefaultConfiguration() {
             string destination = Path.Combine(userDataRoot, "shipofharkinian.json");
-            if (File.Exists(destination) || String.IsNullOrWhiteSpace(options.BootstrapRoot)) {
+            if (File.Exists(destination)) {
                 return;
             }
-            string source = Path.Combine(options.BootstrapRoot, "_bootstrap", "default-shipofharkinian.json");
-            CopyIfMissing(source, destination);
+            string contents = ReadBootstrapDefaultConfiguration();
+            if (!String.IsNullOrWhiteSpace(contents)) {
+                AtomicFile.WriteAllText(destination, contents);
+            }
         }
 
         public LaunchOutcome Run(BackgroundWorker worker) {
@@ -403,10 +410,10 @@ namespace HyruleCoop.Launcher {
         }
 
         private ReleaseManifest LoadBootstrapManifest() {
-            if (String.IsNullOrWhiteSpace(options.BootstrapRoot)) {
+            if (String.IsNullOrWhiteSpace(bootstrapPayloadRoot)) {
                 return null;
             }
-            string path = Path.Combine(options.BootstrapRoot, "_bootstrap", "hyrule-coop-release.json");
+            string path = Path.Combine(bootstrapPayloadRoot, "_bootstrap", "hyrule-coop-release.json");
             if (!File.Exists(path)) {
                 return null;
             }
@@ -655,7 +662,7 @@ namespace HyruleCoop.Launcher {
 
         private static WebClient CreateWebClient() {
             WebClient client = new WebClient();
-            client.Headers[HttpRequestHeader.UserAgent] = "HyruleCoopLauncher/1.0";
+            client.Headers[HttpRequestHeader.UserAgent] = "HyruleCoopLauncher/1.1";
             return client;
         }
 
@@ -694,10 +701,10 @@ namespace HyruleCoop.Launcher {
         }
 
         private string ResolveBootstrapArchive(ReleaseManifest manifest) {
-            if (String.IsNullOrWhiteSpace(manifest.runtimeArchive) || String.IsNullOrWhiteSpace(options.BootstrapRoot)) {
+            if (String.IsNullOrWhiteSpace(manifest.runtimeArchive) || String.IsNullOrWhiteSpace(bootstrapPayloadRoot)) {
                 return null;
             }
-            string bootstrapDirectory = Path.GetFullPath(Path.Combine(options.BootstrapRoot, "_bootstrap"));
+            string bootstrapDirectory = Path.GetFullPath(Path.Combine(bootstrapPayloadRoot, "_bootstrap"));
             string archive = Path.GetFullPath(Path.Combine(bootstrapDirectory, manifest.runtimeArchive));
             if (!archive.StartsWith(bootstrapDirectory + Path.DirectorySeparatorChar,
                                     StringComparison.OrdinalIgnoreCase) || !File.Exists(archive)) {
@@ -983,13 +990,29 @@ namespace HyruleCoop.Launcher {
         }
 
         private bool IsBootstrapDefaultConfiguration(string path) {
-            if (!File.Exists(path) || String.IsNullOrWhiteSpace(options.BootstrapRoot)) {
+            if (!File.Exists(path)) {
                 return false;
             }
-            string bootstrapDefault = Path.Combine(options.BootstrapRoot, "_bootstrap", "default-shipofharkinian.json");
-            return File.Exists(bootstrapDefault) &&
-                   String.Equals(Hashing.Sha256(path), Hashing.Sha256(bootstrapDefault),
-                                 StringComparison.OrdinalIgnoreCase);
+            string defaultContents = ReadBootstrapDefaultConfiguration();
+            return defaultContents != null &&
+                   String.Equals(File.ReadAllText(path), defaultContents, StringComparison.Ordinal);
+        }
+
+        private string ReadBootstrapDefaultConfiguration() {
+            if (!String.IsNullOrWhiteSpace(bootstrapPayloadRoot)) {
+                string path = Path.Combine(bootstrapPayloadRoot, "_bootstrap", "default-shipofharkinian.json");
+                if (File.Exists(path)) {
+                    return File.ReadAllText(path);
+                }
+            }
+            using (Stream stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("HyruleCoop.DefaultConfig")) {
+                if (stream == null) {
+                    return null;
+                }
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true)) {
+                    return reader.ReadToEnd();
+                }
+            }
         }
 
         private void WritePreferenceMigrationMarker(string source, string action) {

@@ -34,23 +34,27 @@ $common = @(
     "/reference:System.Windows.Forms.dll"
 )
 
-$bootstrapOutput = Join-Path $OutputDirectory "HyruleCoop.exe"
-& $csc @common "/out:$bootstrapOutput" (Join-Path $repoRoot "launcher\HyruleCoopBootstrap.cs")
-if ($LASTEXITCODE -ne 0) {
-    throw "Hyrule Co-op bootstrap compilation failed."
-}
-
 $launcherOutput = Join-Path $OutputDirectory "HyruleCoopLauncher.exe"
+$defaultConfiguration = Join-Path $repoRoot "docs\WINDOWS_POC_CONFIG.json"
 $launcherReferences = @(
     "/reference:System.IO.Compression.dll",
     "/reference:System.IO.Compression.FileSystem.dll",
     "/reference:System.Web.Extensions.dll"
 )
-& $csc @common @launcherReferences "/out:$launcherOutput" `
+& $csc @common @launcherReferences "/resource:$defaultConfiguration,HyruleCoop.DefaultConfig" `
+    "/out:$launcherOutput" `
     (Join-Path $repoRoot "launcher\HyruleCoopLauncher.cs") `
     (Join-Path $repoRoot "launcher\LauncherEngine.cs")
 if ($LASTEXITCODE -ne 0) {
     throw "Hyrule Co-op launcher compilation failed."
+}
+
+$bootstrapOutput = Join-Path $OutputDirectory "HyruleCoop.exe"
+& $csc @common "/resource:$launcherOutput,HyruleCoop.EmbeddedLauncher" `
+    "/resource:$defaultConfiguration,HyruleCoop.DefaultConfig" `
+    "/out:$bootstrapOutput" (Join-Path $repoRoot "launcher\HyruleCoopBootstrap.cs")
+if ($LASTEXITCODE -ne 0) {
+    throw "Hyrule Co-op bootstrap compilation failed."
 }
 
 Write-Host "Created launcher: $launcherOutput"
