@@ -117,12 +117,13 @@ A guest may need a temporary local prediction for responsiveness, but the host s
 
 ## Save Boundary
 
-Do not silently merge the guest's personal save into the host's save. Prefer a session overlay:
+Do not silently merge the guest's personal save into the host's save. Use a host-owned campaign overlay:
 
 - The host save is canonical for the active session.
 - The guest receives shared inventory and progression in memory.
 - The guest's original local save remains recoverable.
-- Persisting or exporting shared progress is a separate, explicit policy.
+- The host persists canonical shared progress through ordinary manual saves, autosaves, and exit saves.
+- Guest save writes and disconnect restoration use the guest's complete pre-join snapshot.
 
 This is analogous to Sneaky-Pug's provider save namespaces: world identity and persistence ownership must be explicit.
 

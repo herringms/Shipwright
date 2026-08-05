@@ -3,10 +3,12 @@
 #include "DirectSession.h"
 #include "PlayerInterpolation.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace HyruleCoop {
 
@@ -160,6 +162,7 @@ class Manager {
     };
     bool saveOverlayCaptured = false;
     bool observedSaveLoaded = false;
+    std::vector<uint8_t> originalSaveContext;
     std::unordered_map<int16_t, SceneFlagState> originalSceneFlags;
     SharedProgressionState originalProgression;
     SharedProgressionState canonicalProgression;
@@ -189,6 +192,8 @@ class Manager {
     bool automatedTestRemoteSwingRendered = false;
     bool automatedTestFirstDamageObserved = false;
     bool automatedTestPostDeathCleanupObserved = false;
+    bool automatedTestSaveRequested = false;
+    std::atomic<bool> automatedTestSaveCompleted = false;
     uint8_t automatedTestCombatPhase = 0;
     uint32_t automatedTestCombatPhaseTick = 0;
     uint32_t automatedTestPhysicalHits = 0;

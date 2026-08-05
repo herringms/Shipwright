@@ -39,12 +39,13 @@ An engine-independent architectural test executes that entire sequence, includin
   deduplicated, and fall back to TCP after a bounded deadline. Transport ordering does not replace authority,
   idempotency, or readiness.
 
-## Session save overlay
+## Host-owned campaign save
 
-Both peers capture their original durable scene flags and shared progression when direct co-op starts. The game uses
-canonical host state in memory during the session, but normal save copies are sanitized back to each player's original
-values. Disconnect also restores those original values in memory. Exporting shared progress is intentionally not
-implicit.
+The save loaded by the host is the canonical campaign. Normal manual saves, autosaves, and exit saves persist the
+host-authoritative scene flags and shared progression to the host's ordinary save slot. A guest may join from any
+compatible save; joining applies the host's age, durable progression, world state, and coordinated location in memory.
+The guest's complete pre-join save is retained, guest save writes are sanitized back to that snapshot, and disconnect
+restores it in memory. A guest therefore participates in the host campaign without merging or overwriting their own.
 
 Shared progression includes durable inventory slots, child and adult trade items, bottle ownership, equipment,
 upgrades, quest items, dungeon items and keys, health capacity, magic ownership, double defense, Biggoron's Sword
@@ -126,6 +127,6 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - One-time finder notifications for unique durable pickups, without replay during snapshot or reconnect reconciliation
 - Bottle ownership independent of peer-local slot positions, with local ordinary contents and notified host-owned quest
   content transitions such as Ruto's Letter
-- An explicit shared-progress export policy
+- Broader host-save coverage for progression domains not yet represented by a co-op adapter
 - MM player, enemy, quest, and Song of Time behavior adapters
 - Player-count difficulty scaling

@@ -6,8 +6,9 @@ Hyrule Co-op stores Windows saves under `%LOCALAPPDATA%\HyruleCoop\Save`, indepe
 Save slots are `file*.sav`; `global.sav` contains global metadata. The first compatible launch can copy saves from a
 nearby legacy portable installation into that location without deleting the originals.
 
-The Hyrule Co-op bootstrap package is installed once. Each player supplies a supported ROM or imports an existing
-locally generated `oot.o2r`. ROMs, generated O2R archives, mods, logs, and `shipofharkinian.json` live under
+Each player downloads the Hyrule Co-op ZIP once, chooses **Extract All**, and runs `HyruleCoop.exe` from the extracted
+folder. Each player supplies a supported ROM or imports an existing locally generated `oot.o2r`. ROMs, generated O2R
+archives, mods, logs, and `shipofharkinian.json` live under
 `%LOCALAPPDATA%\HyruleCoop\UserData`; saves live under `%LOCALAPPDATA%\HyruleCoop\Save`. They are never part of a
 published runtime. Do not distribute a ROM, generated O2R archive, or another player's saves.
 
@@ -44,6 +45,10 @@ configuration is missing or still byte-for-byte equal to the shipped bootstrap d
 configuration always wins. The launcher records the decision in `preferences-migration-v1.json`, and subsequent
 runtime updates continue to preserve the AppData configuration. This retains enhancement, autosave, message, input,
 controller, audio, and display choices without recursively searching unrelated folders or overwriting newer choices.
+
+During direct co-op, the host's loaded save owns campaign persistence. The guest adopts the host's synchronized
+campaign state in memory, but their personal save remains unchanged. Host manual saves, autosaves, and exit saves use
+the canonical co-op state.
 
 ## Release gate
 

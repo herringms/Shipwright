@@ -37,3 +37,7 @@ required. The previous verified runtime remains available for rollback.
 
 Proof 2 shares durable inventory and equipment while preserving each player's currency, ammunition, current health
 and magic, and bottle contents. The current synchronized gameplay adapters are Deku Baba and Queen Gohma.
+
+The host's loaded save owns campaign progression. Guests may load any compatible save before joining; the host's
+synchronized age, progression, world state, and location take over for the session without modifying the guest's
+personal save. Use Shipwright's normal manual save or autosave on the host to retain campaign progress.

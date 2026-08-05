@@ -71,6 +71,7 @@ SharedProgressionState CaptureSharedProgression(void* saveContextRef) {
     std::copy(std::begin(saveContext->inventory.dungeonKeys), std::end(saveContext->inventory.dungeonKeys),
               state.dungeonKeys.begin());
     state.healthCapacity = saveContext->healthCapacity;
+    state.linkAge = saveContext->linkAge;
     // magicLevel is also used as transient HUD state while the meter is being
     // constructed. Only advertise the durable ownership represented by the
     // acquisition flags.
@@ -113,6 +114,7 @@ void ApplySharedProgression(void* saveContextRef, const SharedProgressionState& 
     std::copy(state.dungeonKeys.begin(), state.dungeonKeys.end(),
               std::begin(saveContext->inventory.dungeonKeys));
     saveContext->healthCapacity = state.healthCapacity;
+    saveContext->linkAge = state.linkAge;
     saveContext->health = std::min(saveContext->health, saveContext->healthCapacity);
     const bool hadMagic = saveContext->isMagicAcquired != 0;
     const bool hadDoubleMagic = saveContext->isDoubleMagicAcquired != 0;

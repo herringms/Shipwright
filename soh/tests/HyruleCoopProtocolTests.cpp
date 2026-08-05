@@ -301,6 +301,7 @@ static void TestCoordinationMessages() {
     progression.shared.dungeonItems[19] = 7;
     progression.shared.dungeonKeys[18] = -1;
     progression.shared.healthCapacity = 0xA0;
+    progression.shared.linkAge = 1;
     progression.shared.magicLevel = 2;
     progression.shared.isMagicAcquired = 1;
     progression.shared.isDoubleMagicAcquired = 1;

@@ -49,6 +49,14 @@ Copy-Item -LiteralPath $ExecutablePath -Destination $hostExe -Force
 Copy-Item -LiteralPath $ExecutablePath -Destination $clientExe -Force
 Copy-Item -LiteralPath $SeedSavePath -Destination (Join-Path $hostDir "Save\file1.sav") -Force
 Copy-Item -LiteralPath $SeedSavePath -Destination (Join-Path $clientDir "Save\file1.sav") -Force
+$guestSavePath = Join-Path $clientDir "Save\file1.sav"
+$guestSave = Get-Content -LiteralPath $guestSavePath -Raw | ConvertFrom-Json
+$hostSeedAge = [int]$guestSave.sections.base.data.linkAge
+$guestStartingAge = if ($hostSeedAge -eq 0) { 1 } else { 0 }
+$guestStartingRupees = 333
+$guestSave.sections.base.data.linkAge = $guestStartingAge
+$guestSave.sections.base.data.rupees = $guestStartingRupees
+$guestSave | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $guestSavePath -Encoding UTF8
 [IO.File]::WriteAllText($hostReport, "")
 [IO.File]::WriteAllText($clientReport, "")
 
@@ -181,7 +189,8 @@ $requiredHostEvidence = @(
     'host\tgohma-host-target-acquired\t',
     'host\tgohma-host-damage-accepted\thit=1 health=1',
     'host\tgohma-host-damage-accepted\thit=2 health=0',
-    'host\tgohma-host-target-released\t'
+    'host\tgohma-host-target-released\t',
+    'host\thost-campaign-save-complete\t'
 )
 $requiredClientEvidence = @(
     'client\tdeku-baba-target-acquired\t',
@@ -194,7 +203,8 @@ $requiredClientEvidence = @(
     'client\tgohma-physical-sword-collision\thit=2',
     'client\tgohma-first-damage-synchronized\thealth=2 -> health=1',
     'client\tgohma-death-cleanup-visible\t',
-    'client\tgohma-post-death-attack-rejected\t'
+    'client\tgohma-post-death-attack-rejected\t',
+    'client\tguest-save-protection-complete\t'
 )
 foreach ($pattern in $requiredHostEvidence) {
     if ($hostText -notmatch $pattern) {
@@ -206,6 +216,35 @@ foreach ($pattern in $requiredClientEvidence) {
         throw "Hyrule Co-op localhost proof is missing client gameplay evidence: $pattern"
     }
 }
+
+$hostSave = Get-Content -LiteralPath (Join-Path $hostDir "Save\file1.sav") -Raw | ConvertFrom-Json
+$savedGuest = Get-Content -LiteralPath $guestSavePath -Raw | ConvertFrom-Json
+$hostData = $hostSave.sections.base.data
+$guestData = $savedGuest.sections.base.data
+# Shipwright reconciles these transient/current-load fields when the test flips
+# the guest to the opposite Link age. They are unrelated to co-op campaign state.
+$guestSave.sections.base.data.entranceIndex = $guestData.entranceIndex
+$guestSave.sections.base.data.magicLevel = $guestData.magicLevel
+$guestSave.sections.base.data.equips.buttonItems[0] = $guestData.equips.buttonItems[0]
+$guestSave.sections.base.data.equips.equipment = $guestData.equips.equipment
+$guestSave.sections.base.data.inventory.equipment = $guestData.inventory.equipment
+$normalizedGuestData = $guestSave.sections.base.data | ConvertTo-Json -Depth 100 -Compress
+$savedGuestData = $guestData | ConvertTo-Json -Depth 100 -Compress
+$forestScene = 0x55
+$collectibleMask = [uint32](1 -shl 0x1E)
+$switchMask = [Convert]::ToUInt32("80000000", 16)
+if ([int]$hostData.inventory.items[9] -eq 255 -or [int]$hostData.inventory.items[11] -eq 255 -or
+    (([uint32]$hostData.sceneFlags[$forestScene].collect -band $collectibleMask) -eq 0) -or
+    (([uint32]$hostData.sceneFlags[$forestScene].swch -band $switchMask) -eq 0) -or
+    [int]$hostData.rupees -ne 111 -or [int]$hostData.linkAge -ne $hostSeedAge) {
+    throw "Host save did not persist the canonical co-op campaign and host-local resources."
+}
+if ([int]$guestData.rupees -ne $guestStartingRupees -or [int]$guestData.linkAge -ne $guestStartingAge -or
+    $savedGuestData -cne $normalizedGuestData) {
+    throw "Guest save was overwritten by the host campaign or guest session resources."
+}
+Write-Host "Host-owned campaign persistence: PASS"
+Write-Host "Guest personal save protection: PASS"
 
 Write-Host "Hyrule Co-op localhost proof: PASS"
 Write-Host "Exact build fingerprint: $hostBuild"

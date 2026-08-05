@@ -61,7 +61,9 @@ enum AutomatedTestStage : uint8_t {
     TestAwaitingBossReady,
     TestBossCombat,
     TestAwaitingBossCompletion,
+    TestAwaitingGuestProtection,
     TestAwaitingReconnect,
+    TestAwaitingPersistence,
     TestComplete,
     TestFailed,
 };
@@ -273,6 +275,8 @@ void Manager::ConfigureAutomatedTestFromEnvironment() {
 
     automatedTestEnabled = true;
     automatedTestClient = requestedRole == "client";
+    automatedTestSaveRequested = false;
+    automatedTestSaveCompleted.store(false);
     automatedTestStage = TestAwaitingSave;
     automatedTestStageTick = 0;
     ReportAutomatedTest("configured", "port=" + std::to_string(automatedTestPort) + " build=" + CurrentBuildId());
@@ -490,18 +494,11 @@ const std::string& Manager::GetRemotePlayerName() const {
 }
 
 void Manager::SanitizeSaveCopy(void* saveContextRef) const {
-    if (!saveOverlayCaptured || saveContextRef == nullptr) {
+    if (!saveOverlayCaptured || saveContextRef == nullptr || transport.GetRole() != SessionRole::Client ||
+        originalSaveContext.size() != sizeof(SaveContext)) {
         return;
     }
-    SaveContext* saveContext = static_cast<SaveContext*>(saveContextRef);
-    for (const auto& [scene, state] : originalSceneFlags) {
-        SavedSceneFlags& flags = saveContext->sceneFlags[scene];
-        flags.chest = state.chest;
-        flags.swch = state.switches;
-        flags.clear = state.clear;
-        flags.collect = state.collectible;
-    }
-    ApplySharedProgression(saveContext, originalProgression);
+    std::memcpy(saveContextRef, originalSaveContext.data(), sizeof(SaveContext));
 }
 
 void Manager::PrepareRemotePlayer(void* actorRef) {
@@ -561,6 +558,11 @@ void Manager::RegisterHooks(bool enabled) {
         ReportAutomatedTest("save-boot-requested", "slot=1");
     });
     COND_HOOK(OnGameFrameUpdate, enabled, [this]() { Update(); });
+    COND_HOOK(OnSaveFile, enabled && automatedTestEnabled, [this](int32_t fileNum, int32_t sectionId) {
+        if (fileNum == 0 && sectionId == SECTION_ID_BASE && automatedTestSaveRequested) {
+            automatedTestSaveCompleted.store(true);
+        }
+    });
     COND_HOOK(OnSceneSpawnActors, enabled, [this]() {
         remotePlayer = nullptr;
         localDekuBabas.clear();
@@ -766,6 +768,7 @@ void Manager::ResetSessionState() {
     saveOverlayCaptured = false;
     observedSaveLoaded = false;
     originalSceneFlags.clear();
+    originalSaveContext.clear();
     originalProgression = {};
     canonicalProgression = {};
     canonicalProgressionCaptured = false;
@@ -2357,6 +2360,11 @@ void Manager::UpdateAutomatedTest() {
             if (!hookshotShared || !swordShared || !faroresWindShared) {
                 return;
             }
+            if (automatedTestClient &&
+                (!remotePlayerSnapshot.has_value() || gSaveContext.linkAge != remotePlayerSnapshot->linkAge)) {
+                FailAutomatedTest("guest did not adopt the host save's Link age");
+                return;
+            }
             if (gSaveContext.rupees != expectedRupees ||
                 gSaveContext.inventory.ammo[SLOT_BOW] != expectedArrows || gSaveContext.magic != expectedMagic ||
                 gSaveContext.magicLevel != 1 || gSaveContext.magicCapacity != MAGIC_NORMAL_METER ||
@@ -2678,6 +2686,18 @@ void Manager::UpdateAutomatedTest() {
                 SetAutomatedTestStage(TestAwaitingReconnect, "host-awaiting-client-reconnect");
                 return;
             }
+            automatedTestSaveRequested = true;
+            automatedTestSaveCompleted.store(false);
+            SaveManager::Instance->SaveFile(gSaveContext.fileNum);
+            ReportAutomatedTest("guest-save-requested", "personal save protection active");
+            SetAutomatedTestStage(TestAwaitingGuestProtection, "guest-save-protection-started");
+            return;
+        }
+        case TestAwaitingGuestProtection: {
+            if (!automatedTestSaveCompleted.load()) {
+                return;
+            }
+            ReportAutomatedTest("guest-save-protection-complete", "pre-join save written unchanged");
             automatedTestReconnectStarted = true;
             Disconnect();
             // Simulate a stale guest only after disconnect cleanup has restored its local save overlay.
@@ -2718,9 +2738,16 @@ void Manager::UpdateAutomatedTest() {
                 CHECK_OWNED_EQUIP(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_KOKIRI) != 0;
             const bool bossClear = (gSaveContext.sceneFlags[SCENE_DEKU_TREE_BOSS].clear & kGohmaRoomMask) != 0;
             const bool worldState = Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) != 0;
-            const int16_t expectedRupees = automatedTestClient ? 222 : 111;
-            const int8_t expectedArrows = automatedTestClient ? 23 : 7;
-            const int8_t expectedMagic = automatedTestClient ? kAutomatedTestClientMagic : kAutomatedTestHostMagic;
+            int16_t expectedRupees = 111;
+            int8_t expectedArrows = 7;
+            int8_t expectedMagic = kAutomatedTestHostMagic;
+            if (automatedTestClient && originalSaveContext.size() == sizeof(SaveContext)) {
+                SaveContext protectedGuestSave{};
+                std::memcpy(&protectedGuestSave, originalSaveContext.data(), sizeof(SaveContext));
+                expectedRupees = protectedGuestSave.rupees;
+                expectedArrows = protectedGuestSave.inventory.ammo[SLOT_BOW];
+                expectedMagic = protectedGuestSave.magic;
+            }
             if (!collected || !dead || !hookshotShared || !faroresWindShared || !swordShared || !bossClear ||
                 !worldState || remotePlayer == nullptr) {
                 return;
@@ -2729,7 +2756,15 @@ void Manager::UpdateAutomatedTest() {
                 gSaveContext.inventory.ammo[SLOT_BOW] != expectedArrows || gSaveContext.magic != expectedMagic ||
                 gSaveContext.magicLevel != 1 || gSaveContext.magicCapacity != MAGIC_NORMAL_METER ||
                 !gSaveContext.isMagicAcquired || gSaveContext.isDoubleMagicAcquired) {
-                FailAutomatedTest("reconnect overwrote a local resource or corrupted the magic meter");
+                FailAutomatedTest(
+                    "reconnect resource mismatch: rupees=" + std::to_string(gSaveContext.rupees) + "/" +
+                    std::to_string(expectedRupees) + " arrows=" +
+                    std::to_string(gSaveContext.inventory.ammo[SLOT_BOW]) + "/" + std::to_string(expectedArrows) +
+                    " magic=" + std::to_string(gSaveContext.magic) + "/" + std::to_string(expectedMagic) +
+                    " level=" + std::to_string(gSaveContext.magicLevel) + " capacity=" +
+                    std::to_string(gSaveContext.magicCapacity) + " acquired=" +
+                    std::to_string(gSaveContext.isMagicAcquired) + " double=" +
+                    std::to_string(gSaveContext.isDoubleMagicAcquired));
                 return;
             }
             ReportAutomatedTest(
@@ -2737,10 +2772,28 @@ void Manager::UpdateAutomatedTest() {
                 automatedTestClient
                     ? "pickup, spell, equipment, world event, boss completion, and remote Link replayed to stale guest"
                     : "enemy, pickup, spell, equipment, scene switch, world event, boss completion, and remote Link retained by host");
+            if (!automatedTestClient && !automatedTestSaveRequested) {
+                automatedTestSaveRequested = true;
+                automatedTestSaveCompleted.store(false);
+                SaveManager::Instance->SaveFile(gSaveContext.fileNum);
+                ReportAutomatedTest("host-campaign-save-requested", "canonical campaign state ready for persistence");
+                SetAutomatedTestStage(TestAwaitingPersistence, "campaign-persistence-save-started");
+                return;
+            }
+            if (automatedTestClient) {
+                automatedTestStage = TestComplete;
+                ReportAutomatedTest("PASS", "full two-instance OoT vertical proof completed");
+            }
+            return;
+        }
+        case TestAwaitingPersistence:
+            if (!automatedTestSaveCompleted.load()) {
+                return;
+            }
+            ReportAutomatedTest("host-campaign-save-complete", "canonical host campaign written");
             automatedTestStage = TestComplete;
             ReportAutomatedTest("PASS", "full two-instance OoT vertical proof completed");
             return;
-        }
         default:
             return;
     }
@@ -2754,6 +2807,8 @@ void Manager::CaptureSaveOverlay() {
     if (!IsSaveLoaded() || saveOverlayCaptured) {
         return;
     }
+    originalSaveContext.resize(sizeof(SaveContext));
+    std::memcpy(originalSaveContext.data(), &gSaveContext, sizeof(SaveContext));
     originalSceneFlags.reserve(SCENE_ID_MAX);
     for (int16_t scene = 0; scene < SCENE_ID_MAX; ++scene) {
         const SavedSceneFlags& flags = gSaveContext.sceneFlags[scene];
@@ -2769,10 +2824,21 @@ void Manager::CaptureSaveOverlay() {
 }
 
 void Manager::RestoreSaveOverlay() {
-    if (!saveOverlayCaptured || !IsSaveLoaded()) {
+    if (!saveOverlayCaptured || transport.GetRole() != SessionRole::Client ||
+        originalSaveContext.size() != sizeof(SaveContext)) {
         return;
     }
-    SanitizeSaveCopy(&gSaveContext);
+    std::memcpy(&gSaveContext, originalSaveContext.data(), sizeof(SaveContext));
+    const int8_t durableMagicLevel =
+        gSaveContext.isDoubleMagicAcquired ? 2 : (gSaveContext.isMagicAcquired ? 1 : 0);
+    const int16_t durableMagicCapacity = durableMagicLevel * MAGIC_NORMAL_METER;
+    gSaveContext.magicLevel = durableMagicLevel;
+    gSaveContext.magicCapacity = durableMagicCapacity;
+    gSaveContext.magic = std::clamp<int16_t>(gSaveContext.magic, 0, durableMagicCapacity);
+    gSaveContext.magicFillTarget = gSaveContext.magic;
+    gSaveContext.magicTarget = gSaveContext.magic;
+    gSaveContext.magicState = MAGIC_STATE_IDLE;
+    gSaveContext.prevMagicState = MAGIC_STATE_IDLE;
     if (gPlayState != nullptr) {
         const auto state = originalSceneFlags.find(gPlayState->sceneNum);
         if (state != originalSceneFlags.end()) {

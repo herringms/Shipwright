@@ -1,13 +1,14 @@
 Hyrule Co-op for Windows
 
-Start HyruleCoop.exe. Do not start soh.exe from a Runtime folder.
+Download the Hyrule Co-op ZIP, right-click it, choose Extract All, and open the resulting folder. Double-click
+HyruleCoop.exe to play. Do not start soh.exe from a Runtime folder.
 
 The first launch installs the bundled, verified game runtime under:
 %LOCALAPPDATA%\HyruleCoop\Runtime
 
-It checks only the immediate sibling folders beside this bootstrap for an existing Shipwright installation. It does
-not recursively search the computer or follow junctions. A folder must contain soh.exe plus an O2R, save, or known
-Shipwright log before it is offered. You can also choose an installation or ROM manually.
+It checks only the immediate sibling folders beside the extracted Hyrule Co-op folder for an existing Shipwright
+installation. It does not recursively search the computer or follow junctions. A folder must contain soh.exe plus
+an O2R, save, or known Shipwright log before it is offered. You can also choose an installation or ROM manually.
 
 Imported O2Rs, settings, mods, and saves are copied without modifying their original files. Copying a ROM into
 AppData is always a separate, explicit choice. Player data remains under %LOCALAPPDATA%\HyruleCoop and is not part

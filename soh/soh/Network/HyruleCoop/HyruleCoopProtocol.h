@@ -12,7 +12,7 @@
 namespace HyruleCoop {
 
 constexpr uint32_t kPacketMagic = 0x48434F50; // HCOP
-constexpr uint16_t kProtocolVersion = 5;
+constexpr uint16_t kProtocolVersion = 6;
 constexpr size_t kHeaderSize = 24;
 constexpr uint32_t kMaximumPayloadSize = 1024 * 1024;
 constexpr size_t kMaximumActorAdapterWords = 64;
@@ -291,6 +291,7 @@ struct SharedProgressionState {
     std::array<uint8_t, 20> dungeonItems = {};
     std::array<int8_t, 19> dungeonKeys = {};
     int16_t healthCapacity = 0;
+    uint8_t linkAge = 0;
     uint8_t magicLevel = 0;
     uint8_t isMagicAcquired = 0;
     uint8_t isDoubleMagicAcquired = 0;

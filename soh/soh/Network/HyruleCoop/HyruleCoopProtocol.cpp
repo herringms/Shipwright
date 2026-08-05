@@ -918,6 +918,7 @@ std::vector<uint8_t> EncodeProgressionSnapshot(const ProgressionSnapshotMessage&
         writer.WriteU8(static_cast<uint8_t>(keys));
     }
     writer.WriteU16(static_cast<uint16_t>(message.shared.healthCapacity));
+    writer.WriteU8(message.shared.linkAge);
     writer.WriteU8(message.shared.magicLevel);
     writer.WriteU8(message.shared.isMagicAcquired);
     writer.WriteU8(message.shared.isDoubleMagicAcquired);
@@ -985,7 +986,8 @@ std::optional<ProgressionSnapshotMessage> DecodeProgressionSnapshot(const std::v
         return std::nullopt;
     }
     message.shared.healthCapacity = static_cast<int16_t>(signedValue);
-    if (!reader.ReadU8(message.shared.magicLevel) || !reader.ReadU8(message.shared.isMagicAcquired) ||
+    if (!reader.ReadU8(message.shared.linkAge) || !reader.ReadU8(message.shared.magicLevel) ||
+        !reader.ReadU8(message.shared.isMagicAcquired) ||
         !reader.ReadU8(message.shared.isDoubleMagicAcquired) ||
         !reader.ReadU8(message.shared.isDoubleDefenseAcquired) || !reader.ReadU8(message.shared.bgsFlag) ||
         !reader.ReadU16(signedValue)) {
