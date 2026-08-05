@@ -29,6 +29,8 @@ s16 Left_MM_Margin = 0;
 s16 Right_MM_Margin = 0;
 s16 Bottom_MM_Margin = 0;
 
+extern bool HyruleCoop_GetRemotePlayerMapPosition(s16 scene, float* x, float* z, s16* yaw);
+
 void Map_SavePlayerInitialInfo(PlayState* play) {
     Player* player = GET_PLAYER(play);
 
@@ -767,6 +769,62 @@ void Minimap_DrawCompassIcons(PlayState* play) {
 
         gDPSetPrimColor(OVERLAY_DISP++, 0, 0xFF, lastEntranceColor.r, lastEntranceColor.g, lastEntranceColor.b, 255);
         gSPDisplayList(OVERLAY_DISP++, gCompassArrowDL);
+
+        // Remote Hyrule Co-op player position. The HUD reads the interpolated snapshot and only draws it for the
+        // current scene, so a stale or cross-scene network position cannot leave a marker behind.
+        float remoteX;
+        float remoteZ;
+        s16 remoteYaw;
+        if (HyruleCoop_GetRemotePlayerMapPosition(play->sceneNum, &remoteX, &remoteZ, &remoteYaw)) {
+            tempX = remoteX / (R_COMPASS_SCALE_X * (CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0) ? -1 : 1));
+            tempZ = remoteZ / R_COMPASS_SCALE_Y;
+            if (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosType"), 0) != ORIGINAL_LOCATION) {
+                if (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosType"), 0) == ANCHOR_LEFT) {
+                    if (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.UseMargins"), 0) != 0) {
+                        X_Margins_Minimap = Left_MM_Margin;
+                    };
+                    Matrix_Translate(
+                        OTRGetDimensionFromLeftEdge((tempXOffset + (X_Margins_Minimap * 10) + tempX +
+                                                     (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosX"), 0) * 10)) /
+                                                    10.0f),
+                        (R_COMPASS_OFFSET_Y + ((Y_Margins_Minimap * 10) * -1) - tempZ +
+                         ((CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosY"), 0) * 10) * -1)) /
+                            10.0f,
+                        0.0f, MTXMODE_NEW);
+                } else if (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosType"), 0) == ANCHOR_RIGHT) {
+                    if (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.UseMargins"), 0) != 0) {
+                        X_Margins_Minimap = Right_MM_Margin;
+                    };
+                    Matrix_Translate(
+                        OTRGetDimensionFromRightEdge((tempXOffset + (X_Margins_Minimap * 10) + tempX +
+                                                      (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosX"), 0) * 10)) /
+                                                     10.0f),
+                        (R_COMPASS_OFFSET_Y + ((Y_Margins_Minimap * 10) * -1) - tempZ +
+                         ((CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosY"), 0) * 10) * -1)) /
+                            10.0f,
+                        0.0f, MTXMODE_NEW);
+                } else if (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosType"), 0) == ANCHOR_NONE) {
+                    Matrix_Translate(
+                        (tempXOffset + tempX + (CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosX"), 0) * 10) / 10.0f),
+                        (R_COMPASS_OFFSET_Y + ((Y_Margins_Minimap * 10) * -1) - tempZ +
+                         ((CVarGetInteger(CVAR_COSMETIC("HUD.Minimap.PosY"), 0) * 10) * -1)) /
+                            10.0f,
+                        0.0f, MTXMODE_NEW);
+                }
+            } else {
+                Matrix_Translate(OTRGetDimensionFromRightEdge((tempXOffset + (X_Margins_Minimap * 10) + tempX) / 10.0f),
+                                 (R_COMPASS_OFFSET_Y + ((Y_Margins_Minimap * 10) * -1) - tempZ) / 10.0f, 0.0f,
+                                 MTXMODE_NEW);
+            }
+            Matrix_Scale(0.4f, 0.4f, 0.4f, MTXMODE_APPLY);
+            Matrix_RotateX(-1.6f, MTXMODE_APPLY);
+            tempX = ((0x7FFF - remoteYaw) / 0x400) *
+                    (CVarGetInteger(CVAR_ENHANCEMENT("MirroredWorld"), 0) ? -1 : 1);
+            Matrix_RotateY(tempX / 10.0f, MTXMODE_APPLY);
+            gSPMatrix(OVERLAY_DISP++, MATRIX_NEWMTX(play->state.gfxCtx), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
+            gDPSetPrimColor(OVERLAY_DISP++, 0, 0xFF, 255, 64, 255, 255);
+            gSPDisplayList(OVERLAY_DISP++, gCompassArrowDL);
+        }
     }
 
     CLOSE_DISPS(play->state.gfxCtx);

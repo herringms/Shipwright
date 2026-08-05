@@ -558,6 +558,7 @@ class GameInteractor {
         static void ForceInterfaceUpdate();
         static void UpdateActor(void* refActor);
         static void TeleportPlayer(int32_t nextEntrance);
+        static void TeleportPlayerSilent(int32_t nextEntrance);
         static void ClearAssignedButtons(uint8_t buttonSet);
         static void SetTimeOfDay(uint32_t time);
         static void SetCollisionViewer(bool active);

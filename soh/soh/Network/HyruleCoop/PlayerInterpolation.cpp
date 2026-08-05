@@ -29,6 +29,7 @@ bool IsNewerTick(uint32_t tick, uint32_t previous) {
 
 void PlayerSnapshotInterpolator::Reset() {
     snapshots.clear();
+    activeMeleeSnapshot.reset();
 }
 
 void PlayerSnapshotInterpolator::Push(const PlayerSnapshotMessage& snapshot, uint64_t receivedAtMs) {
@@ -39,10 +40,14 @@ void PlayerSnapshotInterpolator::Push(const PlayerSnapshotMessage& snapshot, uin
         }
         if (IsDiscontinuity(previous, snapshot, receivedAtMs)) {
             snapshots.clear();
+            activeMeleeSnapshot.reset();
         }
     }
 
     snapshots.push_back({ snapshot, receivedAtMs });
+    if (snapshot.meleeWeaponState > 0) {
+        activeMeleeSnapshot = TimedSnapshot{ snapshot, receivedAtMs };
+    }
     while (snapshots.size() > kMaximumSnapshots ||
            (snapshots.size() > 1 && receivedAtMs - snapshots.front().receivedAtMs > kMaximumHistoryMs)) {
         snapshots.pop_front();
@@ -55,12 +60,14 @@ bool PlayerSnapshotInterpolator::Sample(uint64_t nowMs, PlayerSnapshotMessage& r
     }
     if (snapshots.size() == 1) {
         result = snapshots.back().snapshot;
+        ApplyLatchedMeleeAction(nowMs > kInterpolationDelayMs ? nowMs - kInterpolationDelayMs : 0, result);
         return true;
     }
 
     const uint64_t targetMs = nowMs > kInterpolationDelayMs ? nowMs - kInterpolationDelayMs : 0;
     if (targetMs <= snapshots.front().receivedAtMs) {
         result = snapshots.front().snapshot;
+        ApplyLatchedMeleeAction(targetMs, result);
         return true;
     }
 
@@ -76,6 +83,7 @@ bool PlayerSnapshotInterpolator::Sample(uint64_t nowMs, PlayerSnapshotMessage& r
                                  : static_cast<float>(targetMs - from.receivedAtMs) /
                                        static_cast<float>(durationMs);
         result = Interpolate(from.snapshot, to.snapshot, std::clamp(amount, 0.0f, 1.0f));
+        ApplyLatchedMeleeAction(targetMs, result);
         return true;
     }
 
@@ -86,6 +94,7 @@ bool PlayerSnapshotInterpolator::Sample(uint64_t nowMs, PlayerSnapshotMessage& r
     const uint64_t extrapolationMs =
         std::min(targetMs - latest.receivedAtMs, kMaximumExtrapolationMs);
     if (durationMs == 0 || durationMs > kDiscontinuityGapMs || extrapolationMs == 0) {
+        ApplyLatchedMeleeAction(targetMs, result);
         return true;
     }
 
@@ -96,6 +105,7 @@ bool PlayerSnapshotInterpolator::Sample(uint64_t nowMs, PlayerSnapshotMessage& r
                                 kMaximumExtrapolationSpeedPerMs);
         result.position[axis] += speedPerMs * static_cast<float>(extrapolationMs);
     }
+    ApplyLatchedMeleeAction(targetMs, result);
     return true;
 }
 
@@ -140,6 +150,32 @@ bool PlayerSnapshotInterpolator::IsDiscontinuity(const TimedSnapshot& previous,
         distanceSquared += delta * delta;
     }
     return distanceSquared > kDiscontinuityDistance * kDiscontinuityDistance;
+}
+
+void PlayerSnapshotInterpolator::ApplyLatchedMeleeAction(uint64_t targetMs,
+                                                         PlayerSnapshotMessage& result) const {
+    if (!activeMeleeSnapshot.has_value()) {
+        return;
+    }
+
+    const TimedSnapshot& action = *activeMeleeSnapshot;
+    if (targetMs < action.receivedAtMs || targetMs - action.receivedAtMs > kMeleeActionHoldMs ||
+        result.scope.sessionEpoch != action.snapshot.scope.sessionEpoch ||
+        result.scope.worldGeneration != action.snapshot.scope.worldGeneration ||
+        result.scene != action.snapshot.scene) {
+        return;
+    }
+
+    // Discrete attack state can be shorter than the interpolation delay. Preserve the edge while position and
+    // joints continue to interpolate so an immediately following idle packet cannot hide the remote weapon.
+    result.buttonItem = action.snapshot.buttonItem;
+    result.itemAction = action.snapshot.itemAction;
+    result.heldItemAction = action.snapshot.heldItemAction;
+    result.modelGroup = action.snapshot.modelGroup;
+    result.modelState = action.snapshot.modelState;
+    result.actionVariable = action.snapshot.actionVariable;
+    result.meleeWeaponState = action.snapshot.meleeWeaponState;
+    result.meleeWeaponAnimation = action.snapshot.meleeWeaponAnimation;
 }
 
 } // namespace HyruleCoop

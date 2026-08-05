@@ -22,6 +22,7 @@ inline constexpr const char* OotGuestAttack = "oot.combat.guestIntent.v1";
 inline constexpr const char* OotCollectible = "oot.collectible.v1";
 inline constexpr const char* OotSharedProgression = "oot.sharedProgression.v1";
 inline constexpr const char* OotGohma = "oot.boss.gohma.v1";
+inline constexpr const char* OotEnemyBaseline = "oot.enemy.baseline.v1";
 inline constexpr const char* MmCycle = "mm.cycle.v1";
 } // namespace Capability
 

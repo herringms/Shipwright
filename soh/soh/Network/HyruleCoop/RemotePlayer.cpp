@@ -41,6 +41,7 @@ extern "C" void HyruleCoopRemotePlayer_Init(Actor* actor, PlayState* play) {
 
     Player* player = reinterpret_cast<Player*>(actor);
     const s32 originalAge = gSaveContext.linkAge;
+    const u8 originalButtonItem = gSaveContext.equips.buttonItems[0];
     gSaveContext.linkAge = state->linkAge;
 
     actor->room = -1;
@@ -49,11 +50,25 @@ extern "C" void HyruleCoopRemotePlayer_Init(Actor* actor, PlayState* play) {
     Player_UseItem(play, player, ITEM_NONE);
     Player_SetModelGroup(player, Player_ActionToModelGroup(player, player->heldItemAction));
     play->playerInit(player, play, gPlayerSkelHeaders[state->linkAge]);
-    Effect_Delete(play, player->meleeWeaponEffectIndex);
-    player->meleeWeaponEffectIndex = TOTAL_EFFECT_COUNT;
     play->func_11D54(player, play);
 
-    actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
+    // playerInit establishes local defaults. Reapply the replicated presentation before the first draw so a
+    // reconnect cannot briefly render the guest without an equipped mask or weapon.
+    player->currentBoots = state->boots;
+    player->currentShield = state->shield;
+    player->currentTunic = state->tunic;
+    player->currentMask = state->currentMask;
+    player->itemAction = state->itemAction;
+    player->heldItemAction = state->heldItemAction;
+    player->meleeWeaponState = state->meleeWeaponState;
+    player->meleeWeaponAnimation = state->meleeWeaponAnimation;
+    HyruleCoop::Manager::Instance->NotifyRemotePlayerPoseApplied(state->meleeWeaponState > 0);
+    gSaveContext.equips.buttonItems[0] = state->buttonItem;
+    Player_SetModelGroup(player, state->modelGroup);
+    gSaveContext.equips.buttonItems[0] = originalButtonItem;
+
+    actor->flags |=
+        ACTOR_FLAG_LOCK_ON_DISABLED | ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
     actor->shape.shadowAlpha = 255;
     gSaveContext.linkAge = originalAge;
 
@@ -101,7 +116,10 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
     player->unk_85C = state->modelBlend;
     player->av1.actionVar1 = state->actionVariable;
     player->linearVelocity = state->linearVelocity;
-    HyruleCoop::Manager::Instance->NotifyRemotePlayerPoseApplied(state->meleeWeaponState > 0);
+    // Player_Draw uses these independently of the skeleton pose. Without them the remote Link can play a sword
+    // swing animation while the weapon model remains hidden.
+    player->meleeWeaponState = state->meleeWeaponState;
+    player->meleeWeaponAnimation = state->meleeWeaponAnimation;
 
     if (player->modelGroup != state->modelGroup) {
         const s32 originalAge = gSaveContext.linkAge;
@@ -112,6 +130,7 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
         gSaveContext.linkAge = originalAge;
         gSaveContext.equips.buttonItems[0] = originalButtonItem;
     }
+    HyruleCoop::Manager::Instance->NotifyRemotePlayerPoseApplied(state->meleeWeaponState > 0);
 }
 
 extern "C" void HyruleCoopRemotePlayer_Draw(Actor* actor, PlayState* play) {
@@ -125,11 +144,17 @@ extern "C" void HyruleCoopRemotePlayer_Draw(Actor* actor, PlayState* play) {
     gSaveContext.linkAge = state->linkAge;
     gSaveContext.equips.buttonItems[0] = state->buttonItem;
     Player_Draw(actor, play);
+    HyruleCoop::Manager::Instance->NotifyRemotePlayerDrawApplied(state->meleeWeaponState > 0, state->currentMask);
     gSaveContext.linkAge = originalAge;
     gSaveContext.equips.buttonItems[0] = originalButtonItem;
 }
 
-extern "C" void HyruleCoopRemotePlayer_Destroy(Actor* actor, PlayState*) {
+extern "C" void HyruleCoopRemotePlayer_Destroy(Actor* actor, PlayState* play) {
+    Player* player = reinterpret_cast<Player*>(actor);
+    if (play != nullptr && player->meleeWeaponEffectIndex < TOTAL_EFFECT_COUNT) {
+        Effect_Delete(play, player->meleeWeaponEffectIndex);
+        player->meleeWeaponEffectIndex = TOTAL_EFFECT_COUNT;
+    }
     if (HyruleCoop::Manager::Instance != nullptr) {
         HyruleCoop::Manager::Instance->NotifyRemotePlayerDestroyed(actor);
     }

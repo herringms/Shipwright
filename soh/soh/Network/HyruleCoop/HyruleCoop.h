@@ -47,6 +47,8 @@ class Manager {
     void PrepareRemotePlayer(void* actor);
     void NotifyRemotePlayerDestroyed(void* actor);
     void NotifyRemotePlayerPoseApplied(bool meleeActive);
+    void NotifyRemotePlayerDrawApplied(bool meleeActive, uint8_t currentMask);
+    void NotifyRemotePlayerMapPositionRead(int16_t scene);
 
   private:
     void RegisterHooks(bool enabled);
@@ -88,6 +90,7 @@ class Manager {
     void SendGlobalFlagIntent(int16_t flagType, int16_t flag, bool set);
     void SendDekuBabaSnapshot(void* actor, bool alive);
     void SendGohmaSnapshot(void* actor, bool alive);
+    void SendGenericEnemySnapshot(void* actor, bool alive);
     void UpdateDekuBaba(void* actor);
     void ApplyDekuBabaAuthority(void* actor, bool* shouldUpdate);
     void ForgetDekuBaba(void* actor);
@@ -95,6 +98,10 @@ class Manager {
     void ApplyGohmaAuthority(void* actor, bool* shouldUpdate);
     void ForgetGohma(void* actor);
     void CompleteGohma(void* actor);
+    void UpdateGenericEnemy(void* actor);
+    void ApplyGenericEnemyAuthority(void* actor, bool* shouldUpdate);
+    void ForgetGenericEnemy(void* actor);
+    void UpdateGenericGuestAttack();
     void InjectAutomatedTestInput(void* actor, bool* shouldUpdate);
     void RefreshRemotePlayer();
     void DestroyRemotePlayer();
@@ -103,12 +110,13 @@ class Manager {
     void CaptureSaveOverlay();
     void RestoreSaveOverlay();
     void UpdateAutomatedTest();
-    void SetAutomatedTestStage(uint8_t stage, const std::string& event);
+    void SetAutomatedTestStage(uint8_t stage, const std::string& event, const std::string& detail = "");
     void ReportAutomatedTest(const std::string& event, const std::string& detail = "");
     void FailAutomatedTest(const std::string& reason);
     void WarpAutomatedTestToForest();
     void BeginAutomatedBossBarrier();
     bool SpawnAutomatedTestDekuBaba();
+    bool SpawnAutomatedTestKeese(const ActorSnapshotMessage& anchor);
     void CaptureCanonicalProgression();
     void ApplyCanonicalProgression(const SharedProgressionState& state);
     void ReconcileKingZora(void* actor);
@@ -172,10 +180,13 @@ class Manager {
     std::unordered_map<uint64_t, uint32_t> lastGuestAttackTick;
     std::unordered_map<uint64_t, void*> localDekuBabas;
     std::unordered_map<uint64_t, void*> localGohmas;
+    std::unordered_map<uint64_t, void*> localGenericEnemies;
     std::unordered_map<uint64_t, ActorSnapshotMessage> actorSnapshots;
+    std::unordered_set<uint64_t> genericGuestTargetsHitThisSwing;
 
     bool automatedTestEnabled = false;
     bool automatedTestClient = false;
+    bool automatedTestRequireDraw = false;
     bool automatedTestSaveBootRequested = false;
     bool automatedTestActorSpawned = false;
     bool automatedTestReconnectStarted = false;
@@ -190,6 +201,9 @@ class Manager {
     bool automatedTestSwingObserved = false;
     bool automatedTestRemoteSwingObserved = false;
     bool automatedTestRemoteSwingRendered = false;
+    bool automatedTestRemoteSwingDrawn = false;
+    bool automatedTestRemotePresentationRendered = false;
+    bool automatedTestRemoteMapPositionRead = false;
     bool automatedTestFirstDamageObserved = false;
     bool automatedTestPostDeathCleanupObserved = false;
     bool automatedTestSaveRequested = false;
@@ -199,6 +213,10 @@ class Manager {
     uint32_t automatedTestPhysicalHits = 0;
     uint32_t automatedTestAcceptedBossHits = 0;
     int16_t automatedTestLastObservedHealth = -1;
+    int16_t automatedTestHostReconnectRupees = 0;
+    int8_t automatedTestHostReconnectArrows = 0;
+    int8_t automatedTestHostReconnectMagic = 0;
+    bool automatedTestHostReconnectResourcesCaptured = false;
     uint32_t automatedTestInputButtons = 0;
     int8_t automatedTestInputStickX = 0;
     int8_t automatedTestInputStickY = 0;

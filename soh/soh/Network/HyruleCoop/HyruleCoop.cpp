@@ -1,5 +1,6 @@
 #include "HyruleCoop.h"
 #include "DekuBabaAdapter.h"
+#include "EntityIdentity.h"
 #include "GohmaAdapter.h"
 #include "ProgressionAdapter.h"
 #include "RemotePlayer.h"
@@ -42,6 +43,7 @@ void Player_UseItem(PlayState* play, Player* player, s32 item);
 s32 EnKz_SetMovedPos(EnKz* thisx, PlayState* play);
 void EnKz_PreMweepWait(EnKz* thisx, PlayState* play);
 void EnKz_Wait(EnKz* thisx, PlayState* play);
+s32 Object_Spawn(ObjectContext* objectCtx, s16 objectId);
 }
 
 namespace HyruleCoop {
@@ -54,6 +56,8 @@ enum AutomatedTestStage : uint8_t {
     TestAwaitingScene,
     TestAwaitingActors,
     TestAttacking,
+    TestAwaitingGenericEnemy,
+    TestGenericCombat,
     TestAwaitingCollection,
     TestAwaitingProgression,
     TestAwaitingWorldState,
@@ -88,6 +92,7 @@ constexpr int16_t kGohmaRoom = 1;
 constexpr uint32_t kGohmaRoomMask = 1u << kGohmaRoom;
 constexpr uint32_t kGuestAttackCooldownFrames = 6;
 constexpr int64_t kGuestAttackStateWindowFrames = 90;
+constexpr int16_t kGuestEnemyHealthSentinel = 127;
 constexpr const char* kHyruleCoopCompatibilityId = "hyrule-coop-poc.3";
 
 uint64_t HashFile(const std::filesystem::path& path, uint64_t hash) {
@@ -188,8 +193,8 @@ const CapabilityList& SupportedCapabilities() {
     static const CapabilityList capabilities = NormalizeCapabilities(
         { Capability::Coordination, Capability::RequestLedger, Capability::OotClock, Capability::OotPlayer,
           Capability::OotPlayerPresentation, Capability::OotSceneFlags, Capability::OotDekuBaba,
-          Capability::OotGuestAttack,
-          Capability::OotCollectible, Capability::OotSharedProgression, Capability::OotGohma })
+          Capability::OotGuestAttack, Capability::OotEnemyBaseline, Capability::OotCollectible,
+          Capability::OotSharedProgression, Capability::OotGohma })
                                                    .value();
     return capabilities;
 }
@@ -215,6 +220,104 @@ float HorizontalDistanceSquared(const float* first, const float* second) {
     const float x = first[0] - second[0];
     const float z = first[2] - second[2];
     return x * x + z * z;
+}
+
+// Ordinary enemies do not share a common actor-private state layout. The baseline only owns fields that every
+// Actor exposes: identity, transform, health, and lifetime. Actor-specific adapters remain responsible for
+// enemies that need exact animation or collider replication.
+bool IsGenericEnemyActor(const Actor* actor) {
+    return actor != nullptr && actor->category == ACTORCAT_ENEMY && actor->id != ACTOR_EN_DEKUBABA &&
+           actor->colChkInfo.health > 0;
+}
+
+uint64_t GetGenericEnemyEntityId(const Actor* actor, int16_t scene, uint32_t worldGeneration) {
+    StaticEntitySignature signature;
+    signature.worldGeneration = worldGeneration;
+    signature.scene = scene;
+    signature.room = actor->room;
+    signature.actorId = actor->id;
+    signature.params = actor->params;
+    signature.homePosition[0] = std::lround(actor->home.pos.x);
+    signature.homePosition[1] = std::lround(actor->home.pos.y);
+    signature.homePosition[2] = std::lround(actor->home.pos.z);
+    signature.homeRotation[0] = actor->home.rot.x;
+    signature.homeRotation[1] = actor->home.rot.y;
+    signature.homeRotation[2] = actor->home.rot.z;
+    return BuildStaticEntityId(signature);
+}
+
+ActorSnapshotMessage CaptureGenericEnemySnapshot(const Actor* actor, int16_t scene, uint32_t hostTick,
+                                                 SessionScope scope, bool alive) {
+    ActorSnapshotMessage message;
+    message.scope = scope;
+    message.hostTick = hostTick;
+    message.entityId = GetGenericEnemyEntityId(actor, scene, scope.worldGeneration);
+    message.scene = scene;
+    message.room = actor->room;
+    message.actorId = actor->id;
+    message.params = actor->params;
+    message.homePosition[0] = actor->home.pos.x;
+    message.homePosition[1] = actor->home.pos.y;
+    message.homePosition[2] = actor->home.pos.z;
+    message.position[0] = actor->world.pos.x;
+    message.position[1] = actor->world.pos.y;
+    message.position[2] = actor->world.pos.z;
+    message.velocity[0] = actor->velocity.x;
+    message.velocity[1] = actor->velocity.y;
+    message.velocity[2] = actor->velocity.z;
+    message.scale[0] = actor->scale.x;
+    message.scale[1] = actor->scale.y;
+    message.scale[2] = actor->scale.z;
+    message.worldRotation[0] = actor->world.rot.x;
+    message.worldRotation[1] = actor->world.rot.y;
+    message.worldRotation[2] = actor->world.rot.z;
+    message.shapeRotation[0] = actor->shape.rot.x;
+    message.shapeRotation[1] = actor->shape.rot.y;
+    message.shapeRotation[2] = actor->shape.rot.z;
+    message.speed = actor->speedXZ;
+    message.gravity = actor->gravity;
+    message.health = actor->colChkInfo.health;
+    message.alive = alive;
+    return message;
+}
+
+bool ApplyGenericEnemySnapshot(Actor* actor, const ActorSnapshotMessage& message) {
+    if (actor == nullptr || actor->id != message.actorId || actor->params != message.params ||
+        message.adapterWordCount != 0) {
+        return false;
+    }
+    actor->world.pos = { message.position[0], message.position[1], message.position[2] };
+    actor->prevPos = actor->world.pos;
+    actor->velocity = { message.velocity[0], message.velocity[1], message.velocity[2] };
+    actor->scale = { message.scale[0], message.scale[1], message.scale[2] };
+    actor->world.rot = { message.worldRotation[0], message.worldRotation[1], message.worldRotation[2] };
+    actor->shape.rot = { message.shapeRotation[0], message.shapeRotation[1], message.shapeRotation[2] };
+    actor->speedXZ = message.speed;
+    actor->gravity = message.gravity;
+    actor->colChkInfo.health = std::max<int16_t>(0, message.health);
+    return true;
+}
+
+bool DamageGenericEnemy(Actor* actor, int16_t damage) {
+    if (actor == nullptr || damage <= 0 || actor->colChkInfo.health <= 0) {
+        return false;
+    }
+    actor->colChkInfo.health = std::max<int16_t>(0, actor->colChkInfo.health - damage);
+    if (actor->colChkInfo.health == 0) {
+        Actor_Kill(actor);
+        return false;
+    }
+    return true;
+}
+
+void ClearLocalTarget(Actor* actor) {
+    if (gPlayState == nullptr || actor == nullptr) {
+        return;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    if (player != nullptr && player->focusActor == actor) {
+        Player_ClearZTargeting(player);
+    }
 }
 
 void EquipAutomatedTestSword(Player* player) {
@@ -272,11 +375,15 @@ void Manager::ConfigureAutomatedTestFromEnvironment() {
         automatedTestReportPath = report;
         std::ofstream clearReport(automatedTestReportPath, std::ios::trunc);
     }
+    automatedTestRequireDraw =
+        std::getenv("HYRULE_COOP_TEST_REQUIRE_DRAW") != nullptr &&
+        std::string(std::getenv("HYRULE_COOP_TEST_REQUIRE_DRAW")) == "1";
 
     automatedTestEnabled = true;
     automatedTestClient = requestedRole == "client";
     automatedTestSaveRequested = false;
     automatedTestSaveCompleted.store(false);
+    automatedTestHostReconnectResourcesCaptured = false;
     automatedTestStage = TestAwaitingSave;
     automatedTestStageTick = 0;
     ReportAutomatedTest("configured", "port=" + std::to_string(automatedTestPort) + " build=" + CurrentBuildId());
@@ -520,18 +627,63 @@ void Manager::NotifyRemotePlayerDestroyed(void* actor) {
 }
 
 void Manager::NotifyRemotePlayerPoseApplied(bool meleeActive) {
-    if (!meleeActive || !automatedTestEnabled || automatedTestClient || automatedTestRemoteSwingRendered) {
+    if (!meleeActive || !automatedTestEnabled || automatedTestRemoteSwingRendered) {
         return;
     }
-    if (automatedTestStage == TestAttacking) {
+    if (automatedTestStage == TestGenericCombat) {
         automatedTestRemoteSwingRendered = true;
-        ReportAutomatedTest("deku-baba-remote-swing-rendered",
-                            "remote Link renderer applied the guest sword pose");
+        ReportAutomatedTest(automatedTestClient ? "generic-enemy-host-swing-state-applied"
+                                                : "generic-enemy-client-swing-state-applied",
+                            automatedTestClient ? "remote Link applied the host sword state"
+                                                : "remote Link applied the client sword state");
+    } else if (automatedTestClient) {
+        return;
+    } else if (automatedTestStage == TestAttacking) {
+        automatedTestRemoteSwingRendered = true;
+        ReportAutomatedTest("deku-baba-remote-swing-state-applied", "remote Link applied the guest sword state");
     } else if (automatedTestStage == TestBossCombat) {
         automatedTestRemoteSwingRendered = true;
-        ReportAutomatedTest("gohma-remote-swing-rendered",
-                            "remote Link renderer applied the guest sword pose");
+        ReportAutomatedTest("gohma-remote-swing-state-applied", "remote Link applied the guest sword state");
     }
+}
+
+void Manager::NotifyRemotePlayerDrawApplied(bool meleeActive, uint8_t currentMask) {
+    if (!automatedTestEnabled || !automatedTestRequireDraw) {
+        return;
+    }
+    if (!automatedTestRemotePresentationRendered && currentMask == PLAYER_MASK_BUNNY &&
+        (automatedTestStage == TestAwaitingActors || automatedTestStage == TestAttacking)) {
+        automatedTestRemotePresentationRendered = true;
+        ReportAutomatedTest(automatedTestClient ? "bunny-hood-host-draw-completed"
+                                                : "bunny-hood-client-draw-completed",
+                            "Player_Draw completed with Bunny Hood state");
+    }
+    if (!meleeActive || automatedTestRemoteSwingDrawn) {
+        return;
+    }
+    if (automatedTestStage == TestGenericCombat) {
+        automatedTestRemoteSwingDrawn = true;
+        ReportAutomatedTest(automatedTestClient ? "generic-enemy-host-swing-draw-completed"
+                                                : "generic-enemy-client-swing-draw-completed",
+                            "Player_Draw completed with the remote sword state");
+    } else if (!automatedTestClient && automatedTestStage == TestAttacking) {
+        automatedTestRemoteSwingDrawn = true;
+        ReportAutomatedTest("deku-baba-remote-swing-draw-completed",
+                            "Player_Draw completed with the guest sword state");
+    } else if (!automatedTestClient && automatedTestStage == TestBossCombat) {
+        automatedTestRemoteSwingDrawn = true;
+        ReportAutomatedTest("gohma-remote-swing-draw-completed",
+                            "Player_Draw completed with the guest sword state");
+    }
+}
+
+void Manager::NotifyRemotePlayerMapPositionRead(int16_t scene) {
+    if (!automatedTestEnabled || automatedTestRemoteMapPositionRead || scene != SCENE_KOKIRI_FOREST) {
+        return;
+    }
+    automatedTestRemoteMapPositionRead = true;
+    ReportAutomatedTest("minimap-remote-position-read",
+                        "minimap draw consumed the same-scene remote player coordinates");
 }
 
 void Manager::RegisterHooks(bool enabled) {
@@ -567,6 +719,7 @@ void Manager::RegisterHooks(bool enabled) {
         remotePlayer = nullptr;
         localDekuBabas.clear();
         localGohmas.clear();
+        localGenericEnemies.clear();
         if (automatedTestEnabled && !automatedTestClient && gPlayState != nullptr &&
             gPlayState->sceneNum == SCENE_DEKU_TREE_BOSS) {
             // Keep the authoritative test player outside Gohma's entrance trigger. The harness prepares the
@@ -600,6 +753,7 @@ void Manager::RegisterHooks(bool enabled) {
         }
         SendPlayerPresentation();
         SendPlayerSnapshot();
+        UpdateGenericGuestAttack();
         if (remotePlayer == nullptr) {
             RefreshRemotePlayer();
         }
@@ -721,6 +875,24 @@ void Manager::RegisterHooks(bool enabled) {
     });
     COND_ID_HOOK(OnActorDestroy, ACTOR_BOSS_GOMA, enabled, [this](void* actor) { ForgetGohma(actor); });
     COND_ID_HOOK(OnBossDefeat, ACTOR_BOSS_GOMA, enabled, [this](void* actor) { CompleteGohma(actor); });
+    COND_HOOK(OnActorUpdate, enabled, [this](void* actor) { UpdateGenericEnemy(actor); });
+    COND_HOOK(ShouldActorUpdate, enabled,
+              [this](void* actor, bool* shouldUpdate) { ApplyGenericEnemyAuthority(actor, shouldUpdate); });
+    COND_HOOK(OnActorKill, enabled, [this](void* actor) {
+        if (transport.GetRole() == SessionRole::Host) {
+            if (automatedTestEnabled && automatedTestStage == TestGenericCombat && actor != nullptr &&
+                static_cast<Actor*>(actor)->id == ACTOR_EN_FIREFLY && gPlayState != nullptr) {
+                if (automatedTestCombatPhase == CombatFirstSwing && automatedTestTargetObserved &&
+                    automatedTestSwingObserved && automatedTestTargetActor == actor) {
+                    ++automatedTestPhysicalHits;
+                    ReportAutomatedTest("generic-enemy-host-physical-collision",
+                                        "hit=" + std::to_string(automatedTestPhysicalHits));
+                }
+            }
+            SendGenericEnemySnapshot(actor, false);
+        }
+    });
+    COND_HOOK(OnActorDestroy, enabled, [this](void* actor) { ForgetGenericEnemy(actor); });
     COND_ID_HOOK(OnActorUpdate, ACTOR_EN_KZ, enabled, [this](void* actor) { ReconcileKingZora(actor); });
     COND_ID_HOOK(ShouldActorUpdate, ACTOR_BG_SPOT08_BAKUDANKABE, enabled,
                  [this](void* actor, bool*) { ReconcileZorasFountainBombableWall(actor); });
@@ -747,6 +919,8 @@ void Manager::ResetPeerState() {
     pendingGuestAttacks.clear();
     pendingGuestAttackRequests.clear();
     lastGuestAttackTick.clear();
+    localGenericEnemies.clear();
+    genericGuestTargetsHitThisSwing.clear();
     protocolError.clear();
 }
 
@@ -967,15 +1141,21 @@ void Manager::HandlePlayerSnapshot(const Packet& packet) {
     if (message->meleeWeaponState > 0) {
         lastRemoteMeleeTick = message->tick;
         lastRemoteMeleeScene = message->scene;
-        if (automatedTestEnabled && !automatedTestClient && !automatedTestRemoteSwingObserved) {
-            if (automatedTestStage == TestAttacking) {
+        if (automatedTestEnabled && !automatedTestRemoteSwingObserved) {
+            if (!automatedTestClient && automatedTestStage == TestAttacking) {
                 automatedTestRemoteSwingObserved = true;
                 ReportAutomatedTest("deku-baba-remote-swing-visible",
                                     "guest melee state reached the host player stream");
-            } else if (automatedTestStage == TestBossCombat) {
+            } else if (!automatedTestClient && automatedTestStage == TestBossCombat) {
                 automatedTestRemoteSwingObserved = true;
                 ReportAutomatedTest("gohma-remote-swing-visible",
                                     "guest melee state reached the host player stream");
+            } else if (automatedTestStage == TestGenericCombat) {
+                automatedTestRemoteSwingObserved = true;
+                ReportAutomatedTest(automatedTestClient ? "generic-enemy-host-swing-visible"
+                                                        : "generic-enemy-client-swing-visible",
+                                    automatedTestClient ? "host melee state reached the guest player stream"
+                                                        : "client melee state reached the host player stream");
             }
         }
     }
@@ -1091,9 +1271,13 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
         return;
     }
     const auto message = DecodeActorSnapshot(packet.payload);
-    if (!message.has_value() || message->entityId == 0 ||
-        (message->actorId != ACTOR_EN_DEKUBABA && message->actorId != ACTOR_BOSS_GOMA) ||
-        !IsCurrentScope(message->scope) || message->scene < 0 || message->scene >= SCENE_ID_MAX) {
+    if (!message.has_value() || message->entityId == 0 || !IsCurrentScope(message->scope) || message->scene < 0 ||
+        message->scene >= SCENE_ID_MAX) {
+        return;
+    }
+    const bool specializedSnapshot = message->actorId == ACTOR_EN_DEKUBABA || message->actorId == ACTOR_BOSS_GOMA;
+    const bool genericBaselineSnapshot = message->adapterWordCount == 0 && !specializedSnapshot;
+    if (!specializedSnapshot && !genericBaselineSnapshot) {
         return;
     }
     if (message->acknowledgedRequestId != 0) {
@@ -1103,6 +1287,16 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
         }
     }
     const auto existing = actorSnapshots.find(message->entityId);
+    if (automatedTestEnabled && message->actorId == ACTOR_EN_DEKUBABA &&
+        automatedTestStage == TestAttacking &&
+        (message->acknowledgedRequestId != 0 || existing == actorSnapshots.end() ||
+         existing->second.health != message->health || existing->second.alive != message->alive)) {
+        ReportAutomatedTest("deku-baba-snapshot-received",
+                            "health=" + std::to_string(message->health) +
+                                " alive=" + std::to_string(message->alive) +
+                                " request=" + std::to_string(message->acknowledgedRequestId) +
+                                " pending=" + std::to_string(pendingGuestAttacks.contains(message->entityId)));
+    }
     if (existing != actorSnapshots.end() && existing->second.hostTick > message->hostTick) {
         return;
     }
@@ -1120,7 +1314,7 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
             return;
         }
         ApplyDekuBabaSnapshot(local->second, *message);
-    } else {
+    } else if (message->actorId == ACTOR_BOSS_GOMA) {
         const auto local = localGohmas.find(message->entityId);
         if (local == localGohmas.end()) {
             return;
@@ -1133,6 +1327,21 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
             return;
         }
         ApplyGohmaSnapshot(local->second, *message);
+    } else {
+        const auto local = localGenericEnemies.find(message->entityId);
+        if (local == localGenericEnemies.end()) {
+            return;
+        }
+        Actor* actor = static_cast<Actor*>(local->second);
+        if (!message->alive) {
+            ClearLocalTarget(actor);
+            Actor_Kill(actor);
+            ClearPendingGuestAttack(message->entityId);
+            lastGuestAttackTick.erase(message->entityId);
+            localGenericEnemies.erase(local);
+            return;
+        }
+        ApplyGenericEnemySnapshot(actor, *message);
     }
 }
 
@@ -1164,7 +1373,7 @@ void Manager::HandleBarrierSnapshot(const Packet& packet) {
         return;
     }
     if (message->state.targetEntrance >= 0) {
-        GameInteractor::RawAction::TeleportPlayer(message->state.targetEntrance);
+        GameInteractor::RawAction::TeleportPlayerSilent(message->state.targetEntrance);
     }
 }
 
@@ -1184,18 +1393,38 @@ void Manager::HandleBarrierReady(const Packet& packet) {
 }
 
 void Manager::HandleAttackIntent(const Packet& packet) {
+    if (automatedTestEnabled) {
+        ReportAutomatedTest("attack-intent-received", "payload=" + std::to_string(packet.payload.size()));
+    }
     if (transport.GetRole() != SessionRole::Host || !handshakeComplete || !IsSaveLoaded()) {
         return;
     }
     const auto message = DecodeAttackIntent(packet.payload);
     if (!message.has_value() || !IsCurrentScope(message->scope) || message->participantId != 2 ||
         message->requestId == 0 || message->entityId == 0 ||
-        (message->attackKind != 1 && message->attackKind != 2)) {
+        (message->attackKind != 1 && message->attackKind != 2 && message->attackKind != 3)) {
+        if (automatedTestEnabled) {
+            ReportAutomatedTest("attack-intent-invalid",
+                                "decoded=" + std::to_string(message.has_value()) +
+                                    " scope=" +
+                                    std::to_string(message.has_value() && IsCurrentScope(message->scope)) +
+                                    " participant=" +
+                                    std::to_string(message.has_value() ? message->participantId : 0) +
+                                    " request=" + std::to_string(message.has_value() ? message->requestId : 0) +
+                                    " entity=" + std::to_string(message.has_value() ? message->entityId : 0) +
+                                    " kind=" + std::to_string(message.has_value() ? message->attackKind : 0));
+        }
         return;
     }
     const RequestKey request{ message->scope, message->participantId, message->requestId };
     RequestOutcome prior;
     const RequestLookup lookup = requestLedger.Lookup(request, &prior);
+    if (automatedTestEnabled && lookup != RequestLookup::New) {
+        ReportAutomatedTest("attack-intent-ledger-blocked",
+                            "lookup=" + std::to_string(static_cast<int>(lookup)) +
+                                " accepted=" + std::to_string(prior.accepted) +
+                                " commit=" + std::to_string(prior.commitId));
+    }
     if (lookup == RequestLookup::Replay) {
         const auto snapshot = actorSnapshots.find(message->entityId);
         if (snapshot != actorSnapshots.end()) {
@@ -1214,6 +1443,7 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     const auto state = actorSnapshots.find(message->entityId);
     const auto baba = localDekuBabas.find(message->entityId);
     const auto gohma = localGohmas.find(message->entityId);
+    const auto genericEnemy = localGenericEnemies.find(message->entityId);
     const int64_t attackStateDelta = static_cast<int64_t>(message->playerTick) -
                                      static_cast<int64_t>(remotePlayerSnapshot.has_value()
                                                               ? remotePlayerSnapshot->tick
@@ -1240,7 +1470,36 @@ void Manager::HandleAttackIntent(const Packet& packet) {
                                     "hit=" + std::to_string(automatedTestAcceptedBossHits) +
                                         " health=" + std::to_string(boss->colChkInfo.health));
             }
+        } else if (message->attackKind == 3 && genericEnemy != localGenericEnemies.end()) {
+            Actor* actor = static_cast<Actor*>(genericEnemy->second);
+            const bool alive = DamageGenericEnemy(actor, 1);
+            SendGenericEnemySnapshot(actor, alive);
+            accepted = true;
+            if (automatedTestEnabled && automatedTestStage == TestGenericCombat && actor->colChkInfo.health == 1) {
+                automatedTestFirstDamageObserved = true;
+                ReportAutomatedTest("generic-enemy-host-damage-accepted", "health=2 -> health=1");
+            }
         }
+    }
+    if (automatedTestEnabled && !accepted) {
+        const float distanceSquared = state != actorSnapshots.end() && remotePlayerSnapshot.has_value()
+                                          ? DistanceSquared(remotePlayerSnapshot->position, state->second.position)
+                                          : -1.0f;
+        ReportAutomatedTest("attack-intent-rejected",
+                            "kind=" + std::to_string(message->attackKind) +
+                                " state=" + std::to_string(state != actorSnapshots.end()) +
+                                " alive=" + std::to_string(state != actorSnapshots.end() && state->second.alive) +
+                                " remote=" + std::to_string(remotePlayerSnapshot.has_value()) +
+                                " message-scene=" + std::to_string(message->scene) +
+                                " remote-scene=" +
+                                std::to_string(remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->scene : -1) +
+                                " state-scene=" +
+                                std::to_string(state != actorSnapshots.end() ? state->second.scene : -1) +
+                                " tick-delta=" + std::to_string(attackStateDelta) +
+                                " distance-squared=" + std::to_string(distanceSquared) +
+                                " baba=" + std::to_string(baba != localDekuBabas.end()) +
+                                " gohma=" + std::to_string(gohma != localGohmas.end()) +
+                                " generic=" + std::to_string(genericEnemy != localGenericEnemies.end()));
     }
     requestLedger.Record(request, { accepted, message->entityId, frameCounter });
     const auto authoritativeState = actorSnapshots.find(message->entityId);
@@ -1442,7 +1701,10 @@ void Manager::SendPlayerSnapshot() {
     message.boots = player->currentBoots;
     message.shield = player->currentShield;
     message.tunic = player->currentTunic;
-    message.currentMask = player->currentMask;
+    message.currentMask = automatedTestEnabled &&
+                                  (automatedTestStage == TestAwaitingActors || automatedTestStage == TestAttacking)
+                              ? static_cast<uint8_t>(PLAYER_MASK_BUNNY)
+                              : player->currentMask;
     message.stateFlags1 = player->stateFlags1;
     message.stateFlags2 = player->stateFlags2 & ~PLAYER_STATE2_DISABLE_DRAW;
     message.buttonItem = gSaveContext.equips.buttonItems[0];
@@ -1474,7 +1736,10 @@ void Manager::SendPlayerPresentation() {
     message.boots = player->currentBoots;
     message.shield = player->currentShield;
     message.tunic = player->currentTunic;
-    message.currentMask = player->currentMask;
+    message.currentMask = automatedTestEnabled &&
+                                  (automatedTestStage == TestAwaitingActors || automatedTestStage == TestAttacking)
+                              ? static_cast<uint8_t>(PLAYER_MASK_BUNNY)
+                              : player->currentMask;
     message.buttonItem = gSaveContext.equips.buttonItems[0];
     message.itemAction = player->itemAction;
     message.heldItemAction = player->heldItemAction;
@@ -1560,6 +1825,13 @@ void Manager::SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackK
     message.attackKind = attackKind;
     if (transport.SendRepeatedRealtime(MessageType::AttackIntent, EncodeAttackIntent(message), message.entityId)) {
         pendingGuestAttackRequests[entityId] = message.requestId;
+        if (automatedTestEnabled) {
+            const TransportTelemetry telemetry = transport.GetTelemetry();
+            ReportAutomatedTest("attack-intent-sent",
+                                "kind=" + std::to_string(attackKind) +
+                                    " request=" + std::to_string(message.requestId) +
+                                    " realtime=" + std::to_string(telemetry.realtimeReady));
+        }
     } else {
         ClearPendingGuestAttack(entityId);
     }
@@ -1729,6 +2001,144 @@ void Manager::ForgetDekuBaba(void* actor) {
     }
 }
 
+void Manager::SendGenericEnemySnapshot(void* actorRef, bool alive) {
+    if (transport.GetRole() != SessionRole::Host || !IsSaveLoaded() || actorRef == nullptr) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    const bool knownActor = std::any_of(localGenericEnemies.begin(), localGenericEnemies.end(),
+                                        [actor](const auto& entry) { return entry.second == actor; });
+    if ((alive && !IsGenericEnemyActor(actor)) || (!alive && !knownActor)) {
+        return;
+    }
+
+    ActorSnapshotMessage message =
+        CaptureGenericEnemySnapshot(actor, gPlayState->sceneNum, frameCounter, sessionScope, alive);
+    const auto previous = actorSnapshots.find(message.entityId);
+    const bool importantTransition = previous == actorSnapshots.end() || previous->second.alive != message.alive ||
+                                     previous->second.health != message.health;
+    actorSnapshots[message.entityId] = message;
+    if (alive) {
+        localGenericEnemies[message.entityId] = actor;
+    }
+    if (importantTransition) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    }
+}
+
+void Manager::UpdateGenericEnemy(void* actorRef) {
+    if (actorRef == nullptr) {
+        return;
+    }
+    if (transport.GetRole() == SessionRole::Host) {
+        if (frameCounter % 2 == 0) {
+            SendGenericEnemySnapshot(actorRef, true);
+        }
+        return;
+    }
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsSaveLoaded()) {
+        return;
+    }
+
+    Actor* actor = static_cast<Actor*>(actorRef);
+    const uint64_t entityId = GetGenericEnemyEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    if (!localGenericEnemies.contains(entityId)) {
+        return;
+    }
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot == actorSnapshots.end()) {
+        return;
+    }
+    if (!snapshot->second.alive) {
+        ClearLocalTarget(actor);
+        Actor_Kill(actor);
+        ClearPendingGuestAttack(entityId);
+        lastGuestAttackTick.erase(entityId);
+        genericGuestTargetsHitThisSwing.erase(entityId);
+        localGenericEnemies.erase(entityId);
+        return;
+    }
+
+    Player* player = GET_PLAYER(gPlayState);
+    const bool nativeSwordHit = player != nullptr && player->meleeWeaponState > 0 &&
+                                actor->colChkInfo.health < kGuestEnemyHealthSentinel;
+    if (nativeSwordHit) {
+        // A single sword action can cross several animation substates. Count it once per enemy until the weapon
+        // returns to idle, while still allowing one sweep to hit multiple enemies.
+        if (!genericGuestTargetsHitThisSwing.contains(entityId) && !pendingGuestAttacks.contains(entityId)) {
+            genericGuestTargetsHitThisSwing.insert(entityId);
+            pendingGuestAttacks.insert(entityId);
+            lastGuestAttackTick[entityId] = frameCounter;
+            if (automatedTestEnabled && automatedTestStage == TestGenericCombat) {
+                ++automatedTestPhysicalHits;
+                ReportAutomatedTest("generic-enemy-client-physical-collision",
+                                    "hit=" + std::to_string(automatedTestPhysicalHits));
+            }
+            SendAttackIntent(entityId, gPlayState->sceneNum, 3);
+        }
+    }
+
+    // Let each client run the actor's own private action and animation state, then pull common fields back to the
+    // host sample. The sentinel prevents that local simulation from committing a guest-only death before its hit
+    // intent is validated by the host.
+    ApplyGenericEnemySnapshot(actor, snapshot->second);
+}
+
+void Manager::ApplyGenericEnemyAuthority(void* actorRef, bool* shouldUpdate) {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Client || !IsSaveLoaded() || actorRef == nullptr ||
+        shouldUpdate == nullptr) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    if (!IsGenericEnemyActor(actor)) {
+        return;
+    }
+    const uint64_t entityId = GetGenericEnemyEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    localGenericEnemies[entityId] = actor;
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot == actorSnapshots.end()) {
+        // Allow vanilla initialization to finish until the host's first authoritative sample arrives.
+        return;
+    }
+    if (!snapshot->second.alive) {
+        ClearLocalTarget(actor);
+        Actor_Kill(actor);
+        ClearPendingGuestAttack(entityId);
+        lastGuestAttackTick.erase(entityId);
+        genericGuestTargetsHitThisSwing.erase(entityId);
+        localGenericEnemies.erase(entityId);
+        return;
+    }
+    // Keep the actor's own update and animation running. Its health becomes a short-lived collision probe and is
+    // reconciled from the host snapshot immediately after that update.
+    actor->colChkInfo.health = kGuestEnemyHealthSentinel;
+}
+
+void Manager::ForgetGenericEnemy(void* actorRef) {
+    for (auto iterator = localGenericEnemies.begin(); iterator != localGenericEnemies.end();) {
+        if (iterator->second == actorRef) {
+            ClearPendingGuestAttack(iterator->first);
+            lastGuestAttackTick.erase(iterator->first);
+            genericGuestTargetsHitThisSwing.erase(iterator->first);
+            iterator = localGenericEnemies.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
+void Manager::UpdateGenericGuestAttack() {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Client || !IsSaveLoaded() || gPlayState == nullptr) {
+        return;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    if (player == nullptr || player->meleeWeaponState <= 0) {
+        genericGuestTargetsHitThisSwing.clear();
+    }
+}
+
 void Manager::SendGohmaSnapshot(void* actor, bool alive) {
     if (transport.GetRole() != SessionRole::Host || !IsSaveLoaded()) {
         return;
@@ -1841,9 +2251,11 @@ void Manager::CompleteGohma(void* actor) {
 
 void Manager::InjectAutomatedTestInput(void* actorRef, bool*) {
     const bool clientGameplayInput = automatedTestClient &&
-                                     (automatedTestStage == TestAttacking || automatedTestStage == TestBossCombat);
+                                     (automatedTestStage == TestAttacking || automatedTestStage == TestGenericCombat ||
+                                      automatedTestStage == TestBossCombat);
     const bool hostBossInput = !automatedTestClient && automatedTestStage == TestBossCombat;
-    if (!automatedTestEnabled || (!clientGameplayInput && !hostBossInput) || !IsSaveLoaded() ||
+    const bool hostGenericInput = !automatedTestClient && automatedTestStage == TestGenericCombat;
+    if (!automatedTestEnabled || (!clientGameplayInput && !hostBossInput && !hostGenericInput) || !IsSaveLoaded() ||
         actorRef == nullptr || actorRef != GET_PLAYER(gPlayState)) {
         return;
     }
@@ -1872,11 +2284,15 @@ void Manager::InjectAutomatedTestInput(void* actorRef, bool*) {
                 automatedTestSwingObserved = true;
             }
         }
-    } else if (automatedTestStage == TestAttacking) {
+    } else if (automatedTestStage == TestAttacking || automatedTestStage == TestGenericCombat) {
         if (automatedTestCombatPhase >= CombatAcquireTarget && automatedTestCombatPhase <= CombatAwaitDeath) {
             buttons |= BTN_Z;
         }
-        if ((automatedTestCombatPhase == CombatFirstSwing || automatedTestCombatPhase == CombatSecondSwing) &&
+        const bool shouldSwing = automatedTestStage == TestGenericCombat
+                                     ? automatedTestCombatPhase == CombatFirstSwing
+                                     : (automatedTestCombatPhase == CombatFirstSwing ||
+                                        automatedTestCombatPhase == CombatSecondSwing);
+        if (shouldSwing &&
             (automatedTestTick - automatedTestCombatPhaseTick) % 36 == 1) {
             buttons |= BTN_B;
         }
@@ -2051,7 +2467,7 @@ void Manager::BeginAutomatedBossBarrier() {
         return;
     }
     SendBarrierSnapshot();
-    GameInteractor::RawAction::TeleportPlayer(ENTR_DEKU_TREE_BOSS_ENTRANCE);
+    GameInteractor::RawAction::TeleportPlayerSilent(ENTR_DEKU_TREE_BOSS_ENTRANCE);
 }
 
 void Manager::CompleteBarrierIfReady() {
@@ -2084,10 +2500,13 @@ void Manager::CompleteBarrierIfReady() {
     }
 }
 
-void Manager::SetAutomatedTestStage(uint8_t stage, const std::string& event) {
+void Manager::SetAutomatedTestStage(uint8_t stage, const std::string& event, const std::string& detail) {
     automatedTestStage = stage;
     automatedTestStageTick = automatedTestTick;
-    ReportAutomatedTest(event);
+    automatedTestInputButtons = 0;
+    automatedTestInputStickX = 0;
+    automatedTestInputStickY = 0;
+    ReportAutomatedTest(event, detail);
 }
 
 void Manager::ReportAutomatedTest(const std::string& event, const std::string& detail) {
@@ -2116,7 +2535,7 @@ void Manager::WarpAutomatedTestToForest() {
         return;
     }
     automatedTestActorSpawned = false;
-    GameInteractor::RawAction::TeleportPlayer(ENTR_KOKIRI_FOREST_0);
+    GameInteractor::RawAction::TeleportPlayerSilent(ENTR_KOKIRI_FOREST_0);
 }
 
 bool Manager::SpawnAutomatedTestDekuBaba() {
@@ -2132,6 +2551,26 @@ bool Manager::SpawnAutomatedTestDekuBaba() {
         return false;
     }
     automatedTestActorSpawned = true;
+    return true;
+}
+
+bool Manager::SpawnAutomatedTestKeese(const ActorSnapshotMessage& anchor) {
+    if (!IsSaveLoaded() || gPlayState->sceneNum != SCENE_KOKIRI_FOREST) {
+        return false;
+    }
+    if (Object_GetIndex(&gPlayState->objectCtx, OBJECT_FIREFLY) < 0 &&
+        Object_Spawn(&gPlayState->objectCtx, OBJECT_FIREFLY) < 0) {
+        return false;
+    }
+
+    const float x = anchor.homePosition[0] + 180.0f;
+    const float y = anchor.homePosition[1] + 40.0f;
+    const float z = anchor.homePosition[2];
+    Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_FIREFLY, x, y, z, 0, 0, 0, 2);
+    if (actor == nullptr) {
+        return false;
+    }
+    actor->colChkInfo.health = 2;
     return true;
 }
 
@@ -2168,6 +2607,8 @@ void Manager::UpdateAutomatedTest() {
                 automatedTestTick - automatedTestStageTick < 30) {
                 return;
             }
+            GET_PLAYER(gPlayState)->currentMask = PLAYER_MASK_BUNNY;
+            automatedTestRemotePresentationRendered = false;
             gSaveContext.sceneFlags[SCENE_KOKIRI_FOREST].collect &= ~collectibleMask;
             gPlayState->actorCtx.flags.collect &= ~collectibleMask;
             gSaveContext.sceneFlags[SCENE_KOKIRI_FOREST].swch &= ~switchMask;
@@ -2208,13 +2649,24 @@ void Manager::UpdateAutomatedTest() {
             SetAutomatedTestStage(TestAwaitingActors, "forest-loaded");
             return;
         case TestAwaitingActors: {
+            // Keep the presentation stable long enough for both peers to observe it before the guest equips a sword,
+            // which legitimately clears masks and would otherwise make this bidirectional proof timing-dependent.
+            if (automatedTestTick - automatedTestStageTick < 60) {
+                return;
+            }
             if (!automatedTestActorSpawned || localDekuBabas.empty() || remotePlayer == nullptr ||
                 !remotePlayerSnapshot.has_value() || remotePlayerSnapshot->scene != SCENE_KOKIRI_FOREST) {
+                return;
+            }
+            if (reinterpret_cast<Player*>(remotePlayer)->currentMask != PLAYER_MASK_BUNNY ||
+                (automatedTestRequireDraw && !automatedTestRemotePresentationRendered)) {
                 return;
             }
             if (automatedTestClient && actorSnapshots.empty()) {
                 return;
             }
+            ReportAutomatedTest(automatedTestClient ? "bunny-hood-host-applied" : "bunny-hood-client-applied",
+                                "remote Player state carries Bunny Hood");
             ReportAutomatedTest("both-links-render-ready", "remote player actor exists in shared scene");
             ReportAutomatedTest("deku-baba-ready", "host-owned actor snapshot available");
             automatedTestCombatPhase = CombatSetup;
@@ -2225,6 +2677,7 @@ void Manager::UpdateAutomatedTest() {
             automatedTestSwingObserved = false;
             automatedTestRemoteSwingObserved = false;
             automatedTestRemoteSwingRendered = false;
+            automatedTestRemoteSwingDrawn = false;
             SetAutomatedTestStage(TestAttacking, "combat-started");
             return;
         }
@@ -2232,6 +2685,20 @@ void Manager::UpdateAutomatedTest() {
             const auto dead = std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
                 return entry.second.scene == SCENE_KOKIRI_FOREST && !entry.second.alive;
             });
+            if (automatedTestClient && automatedTestPhysicalHits > 0 && automatedTestTick % 60 == 0) {
+                const auto live = std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
+                    return entry.second.scene == SCENE_KOKIRI_FOREST && entry.second.alive;
+                });
+                ReportAutomatedTest("deku-baba-combat-state",
+                                    "phase=" + std::to_string(static_cast<int>(automatedTestCombatPhase)) +
+                                        " hits=" + std::to_string(automatedTestPhysicalHits) +
+                                        " melee=" + std::to_string(GET_PLAYER(gPlayState)->meleeWeaponState) +
+                                        " pending=" +
+                                        std::to_string(live != actorSnapshots.end() &&
+                                                       pendingGuestAttacks.contains(live->first)) +
+                                        " health=" +
+                                        std::to_string(live != actorSnapshots.end() ? live->second.health : -1));
+            }
             if (dead != actorSnapshots.end()) {
                 if (automatedTestClient) {
                     Player* player = GET_PLAYER(gPlayState);
@@ -2250,15 +2717,16 @@ void Manager::UpdateAutomatedTest() {
                     Player_UseItem(gPlayState, player, ITEM_NONE);
                     ReportAutomatedTest("deku-baba-target-released", "dead actor cannot remain targeted");
                 } else if (!automatedTestRemoteTargetObserved || !automatedTestRemoteSwingObserved ||
-                           !automatedTestRemoteSwingRendered) {
+                           !automatedTestRemoteSwingRendered ||
+                           (automatedTestRequireDraw && !automatedTestRemoteSwingDrawn)) {
                     return;
                 }
                 ReportAutomatedTest("deku-baba-dead-synchronized", std::to_string(dead->first));
-                if (automatedTestClient) {
-                    Flags_SetCollectible(gPlayState, kAutomatedTestCollectibleFlag);
-                    ReportAutomatedTest("collectible-picked-up", std::to_string(kAutomatedTestCollectibleFlag));
+                if (!SpawnAutomatedTestKeese(dead->second)) {
+                    FailAutomatedTest("could not spawn deterministic ordinary Keese");
+                    return;
                 }
-                SetAutomatedTestStage(TestAwaitingCollection, "collectible-test-started");
+                SetAutomatedTestStage(TestAwaitingGenericEnemy, "ordinary-enemy-test-started");
                 return;
             }
             if (!automatedTestClient) {
@@ -2285,6 +2753,9 @@ void Manager::UpdateAutomatedTest() {
             const auto local = localDekuBabas.find(target->first);
             if (local == localDekuBabas.end()) {
                 return;
+            }
+            if (automatedTestCombatPhase == CombatSecondSwing) {
+                PositionAutomatedTestPlayer(player, static_cast<Actor*>(local->second), 55.0f);
             }
             if (automatedTestCombatPhase == CombatSetup) {
                 automatedTestTargetEntityId = target->first;
@@ -2314,9 +2785,8 @@ void Manager::UpdateAutomatedTest() {
                 ReportAutomatedTest("deku-baba-sword-state-entered",
                                     "Player_Update entered a melee weapon state from B input");
             }
-            if ((automatedTestCombatPhase == CombatFirstSwing ||
-                 automatedTestCombatPhase == CombatSecondSwing) &&
-                automatedTestPhysicalHits > 0 && pendingGuestAttacks.contains(target->first)) {
+            if ((automatedTestCombatPhase == CombatFirstSwing && automatedTestPhysicalHits >= 1) ||
+                (automatedTestCombatPhase == CombatSecondSwing && automatedTestPhysicalHits >= 2)) {
                 automatedTestCombatPhase = CombatAwaitFirstDamage;
                 automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
                 return;
@@ -2326,6 +2796,168 @@ void Manager::UpdateAutomatedTest() {
                 automatedTestLastObservedHealth = target->second.health;
                 automatedTestCombatPhase = CombatSecondSwing;
                 automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+            }
+            if (automatedTestCombatPhase == CombatAwaitFirstDamage && automatedTestTick % 60 == 0) {
+                ReportAutomatedTest("deku-baba-first-hit-wait",
+                                    "pending=" + std::to_string(pendingGuestAttacks.contains(target->first)) +
+                                        " melee=" + std::to_string(player->meleeWeaponState) +
+                                        " health=" + std::to_string(target->second.health));
+            }
+            return;
+        }
+        case TestAwaitingGenericEnemy: {
+            const auto target = std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
+                return entry.second.scene == SCENE_KOKIRI_FOREST && entry.second.actorId == ACTOR_EN_FIREFLY &&
+                       entry.second.alive && entry.second.health == 2;
+            });
+            if (target == actorSnapshots.end()) {
+                return;
+            }
+            const auto local = localGenericEnemies.find(target->first);
+            if (local == localGenericEnemies.end() || remotePlayer == nullptr || !remotePlayerSnapshot.has_value() ||
+                remotePlayerSnapshot->scene != SCENE_KOKIRI_FOREST) {
+                return;
+            }
+            automatedTestTargetEntityId = target->first;
+            automatedTestTargetActor = local->second;
+            automatedTestLastObservedHealth = target->second.health;
+            automatedTestCombatPhase = CombatSetup;
+            automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+            automatedTestPhysicalHits = 0;
+            automatedTestTargetObserved = false;
+            automatedTestRemoteTargetObserved = false;
+            automatedTestSwingObserved = false;
+            automatedTestRemoteSwingObserved = false;
+            automatedTestRemoteSwingRendered = false;
+            automatedTestRemoteSwingDrawn = false;
+            automatedTestFirstDamageObserved = false;
+            ReportAutomatedTest("generic-enemy-ready", std::to_string(target->first));
+            SetAutomatedTestStage(TestGenericCombat, "ordinary-enemy-combat-started");
+            return;
+        }
+        case TestGenericCombat: {
+            const auto target = actorSnapshots.find(automatedTestTargetEntityId);
+            if (target == actorSnapshots.end() || target->second.actorId != ACTOR_EN_FIREFLY ||
+                target->second.scene != SCENE_KOKIRI_FOREST) {
+                return;
+            }
+            Player* player = GET_PLAYER(gPlayState);
+            const auto local = localGenericEnemies.find(target->first);
+
+            if (!target->second.alive) {
+                if (local != localGenericEnemies.end() || player->focusActor == automatedTestTargetActor) {
+                    return;
+                }
+                if (automatedTestPhysicalHits == 0 || !automatedTestTargetObserved ||
+                    !automatedTestSwingObserved || !automatedTestFirstDamageObserved ||
+                    !automatedTestRemoteTargetObserved || !automatedTestRemoteSwingObserved ||
+                    !automatedTestRemoteSwingRendered ||
+                    (automatedTestRequireDraw && !automatedTestRemoteSwingDrawn)) {
+                    return;
+                }
+                ReportAutomatedTest("generic-enemy-target-released", "dead ordinary actor cannot remain targeted");
+                ReportAutomatedTest("generic-enemy-dead-synchronized", std::to_string(target->first));
+                if (automatedTestClient) {
+                    gSaveContext.equips.buttonItems[0] = ITEM_NONE;
+                    Inventory_ChangeEquipment(EQUIP_TYPE_SWORD, EQUIP_VALUE_SWORD_NONE);
+                    gSaveContext.inventory.equipment &=
+                        ~OWNED_EQUIP_FLAG(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_KOKIRI);
+                    Player_UseItem(gPlayState, player, ITEM_NONE);
+                    Flags_SetCollectible(gPlayState, kAutomatedTestCollectibleFlag);
+                    ReportAutomatedTest("collectible-picked-up", std::to_string(kAutomatedTestCollectibleFlag));
+                }
+                SetAutomatedTestStage(TestAwaitingCollection, "collectible-test-started");
+                return;
+            }
+
+            if (remotePlayerSnapshot.has_value() && remotePlayerSnapshot->focusActorId == ACTOR_EN_FIREFLY &&
+                !automatedTestRemoteTargetObserved) {
+                automatedTestRemoteTargetObserved = true;
+                ReportAutomatedTest(automatedTestClient ? "generic-enemy-host-target-visible"
+                                                        : "generic-enemy-client-target-visible",
+                                    automatedTestClient ? "host lock-on reached the guest player stream"
+                                                        : "client lock-on reached the host player stream");
+            }
+
+            if (automatedTestClient) {
+                if (local == localGenericEnemies.end()) {
+                    return;
+                }
+                Actor* actor = static_cast<Actor*>(local->second);
+                if (automatedTestCombatPhase == CombatSetup) {
+                    EquipAutomatedTestSword(player);
+                    PositionAutomatedTestPlayer(player, actor, 55.0f);
+                    automatedTestCombatPhase = CombatAcquireTarget;
+                    automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+                    ReportAutomatedTest("generic-enemy-client-physical-setup", std::to_string(target->first));
+                    return;
+                }
+                if (automatedTestCombatPhase == CombatAcquireTarget) {
+                    PositionAutomatedTestPlayer(player, actor, 55.0f);
+                    if (player->focusActor != automatedTestTargetActor) {
+                        return;
+                    }
+                    automatedTestTargetObserved = true;
+                    automatedTestCombatPhase = CombatFirstSwing;
+                    automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+                    ReportAutomatedTest("generic-enemy-client-target-acquired", "Z input selected the live actor");
+                    return;
+                }
+                if (automatedTestCombatPhase == CombatFirstSwing) {
+                    PositionAutomatedTestPlayer(player, actor, 55.0f);
+                    if (player->meleeWeaponState > 0 && !automatedTestSwingObserved) {
+                        automatedTestSwingObserved = true;
+                        ReportAutomatedTest("generic-enemy-client-sword-state-entered",
+                                            "Player_Update entered a melee weapon state from B input");
+                    }
+                    if (automatedTestPhysicalHits > 0) {
+                        automatedTestCombatPhase = CombatAwaitFirstDamage;
+                        automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+                    }
+                    return;
+                }
+                if (automatedTestCombatPhase == CombatAwaitFirstDamage && target->second.health == 1 &&
+                    !pendingGuestAttacks.contains(target->first)) {
+                    automatedTestFirstDamageObserved = true;
+                    automatedTestLastObservedHealth = 1;
+                    automatedTestCombatPhase = CombatAwaitDeath;
+                    automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+                    ReportAutomatedTest("generic-enemy-client-damage-synchronized", "health=2 -> health=1");
+                }
+                return;
+            }
+
+            if (!automatedTestFirstDamageObserved || target->second.health != 1 ||
+                local == localGenericEnemies.end()) {
+                return;
+            }
+            Actor* actor = static_cast<Actor*>(local->second);
+            if (automatedTestCombatPhase == CombatSetup) {
+                EquipAutomatedTestSword(player);
+                PositionAutomatedTestPlayer(player, actor, 55.0f);
+                automatedTestCombatPhase = CombatAcquireTarget;
+                automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+                ReportAutomatedTest("generic-enemy-host-physical-setup", std::to_string(target->first));
+                return;
+            }
+            if (automatedTestCombatPhase == CombatAcquireTarget) {
+                PositionAutomatedTestPlayer(player, actor, 55.0f);
+                if (player->focusActor != automatedTestTargetActor) {
+                    return;
+                }
+                automatedTestTargetObserved = true;
+                automatedTestCombatPhase = CombatFirstSwing;
+                automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+                ReportAutomatedTest("generic-enemy-host-target-acquired", "Z input selected the live actor");
+                return;
+            }
+            if (automatedTestCombatPhase == CombatFirstSwing) {
+                PositionAutomatedTestPlayer(player, actor, 55.0f);
+                if (player->meleeWeaponState > 0 && !automatedTestSwingObserved) {
+                    automatedTestSwingObserved = true;
+                    ReportAutomatedTest("generic-enemy-host-sword-state-entered",
+                                        "Player_Update entered a melee weapon state from B input");
+                }
             }
             return;
         }
@@ -2459,6 +3091,7 @@ void Manager::UpdateAutomatedTest() {
             automatedTestSwingObserved = false;
             automatedTestRemoteSwingObserved = false;
             automatedTestRemoteSwingRendered = false;
+            automatedTestRemoteSwingDrawn = false;
             automatedTestFirstDamageObserved = false;
             automatedTestPostDeathCleanupObserved = false;
             automatedTestTargetEntityId = 0;
@@ -2517,7 +3150,8 @@ void Manager::UpdateAutomatedTest() {
                 if (automatedTestAcceptedBossHits != 2 || !automatedTestTargetObserved ||
                     !automatedTestRemoteMovementObserved ||
                     !automatedTestRemoteTargetObserved || !automatedTestRemoteSwingObserved ||
-                    !automatedTestRemoteSwingRendered) {
+                    !automatedTestRemoteSwingRendered ||
+                    (automatedTestRequireDraw && !automatedTestRemoteSwingDrawn)) {
                     return;
                 }
                 if (automatedTestCombatPhase != CombatVerifyCleanup ||
@@ -2683,7 +3317,15 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             if (!automatedTestClient) {
-                SetAutomatedTestStage(TestAwaitingReconnect, "host-awaiting-client-reconnect");
+                automatedTestHostReconnectRupees = gSaveContext.rupees;
+                automatedTestHostReconnectArrows = gSaveContext.inventory.ammo[SLOT_BOW];
+                automatedTestHostReconnectMagic = gSaveContext.magic;
+                automatedTestHostReconnectResourcesCaptured = true;
+                SetAutomatedTestStage(
+                    TestAwaitingReconnect, "host-awaiting-client-reconnect",
+                    "rupees=" + std::to_string(automatedTestHostReconnectRupees) +
+                        " arrows=" + std::to_string(automatedTestHostReconnectArrows) +
+                        " magic=" + std::to_string(automatedTestHostReconnectMagic));
                 return;
             }
             automatedTestSaveRequested = true;
@@ -2738,15 +3380,18 @@ void Manager::UpdateAutomatedTest() {
                 CHECK_OWNED_EQUIP(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_KOKIRI) != 0;
             const bool bossClear = (gSaveContext.sceneFlags[SCENE_DEKU_TREE_BOSS].clear & kGohmaRoomMask) != 0;
             const bool worldState = Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) != 0;
-            int16_t expectedRupees = 111;
-            int8_t expectedArrows = 7;
-            int8_t expectedMagic = kAutomatedTestHostMagic;
+            int16_t expectedRupees = automatedTestHostReconnectRupees;
+            int8_t expectedArrows = automatedTestHostReconnectArrows;
+            int8_t expectedMagic = automatedTestHostReconnectMagic;
             if (automatedTestClient && originalSaveContext.size() == sizeof(SaveContext)) {
                 SaveContext protectedGuestSave{};
                 std::memcpy(&protectedGuestSave, originalSaveContext.data(), sizeof(SaveContext));
                 expectedRupees = protectedGuestSave.rupees;
                 expectedArrows = protectedGuestSave.inventory.ammo[SLOT_BOW];
                 expectedMagic = protectedGuestSave.magic;
+            }
+            if (!automatedTestClient && !automatedTestHostReconnectResourcesCaptured) {
+                return;
             }
             if (!collected || !dead || !hookshotShared || !faroresWindShared || !swordShared || !bossClear ||
                 !worldState || remotePlayer == nullptr) {

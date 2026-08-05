@@ -25,8 +25,9 @@ void ApplyCanonicalProgression(SimulatedPlayerState& player, const SimulatedPlay
 int main() {
     const CapabilityList hostCapabilities = NormalizeCapabilities(
         { Capability::Coordination, Capability::RequestLedger, Capability::OotClock, Capability::OotPlayer,
-          Capability::OotSceneFlags, Capability::OotDekuBaba, Capability::OotGuestAttack,
-          Capability::OotCollectible, Capability::OotSharedProgression, Capability::OotGohma })
+          Capability::OotPlayerPresentation, Capability::OotSceneFlags, Capability::OotDekuBaba,
+          Capability::OotGuestAttack, Capability::OotEnemyBaseline, Capability::OotCollectible,
+          Capability::OotSharedProgression, Capability::OotGohma })
                                                     .value();
     const CapabilityList guestCapabilities = hostCapabilities;
     assert(SupportsCapabilities(guestCapabilities, hostCapabilities));
@@ -153,6 +154,6 @@ int main() {
 
     assert(reconnectBarrier.Activate());
     assert(reconnectBarrier.Complete());
-    std::cout << "HyruleCoop architectural proof tests passed\n";
+    std::cout << "HyruleCoop in-memory coordination model tests passed\n";
     return 0;
 }

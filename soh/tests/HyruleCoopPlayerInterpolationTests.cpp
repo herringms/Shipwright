@@ -67,6 +67,31 @@ int main() {
     assert(interpolator.Size() == 0);
     assert(!interpolator.Sample(1300, sampled));
 
+    PlayerSnapshotMessage swing = Snapshot(10, 50.0f);
+    swing.buttonItem = 59;
+    swing.itemAction = 3;
+    swing.heldItemAction = 3;
+    swing.modelGroup = 2;
+    swing.modelState = 12;
+    swing.actionVariable = 1;
+    swing.meleeWeaponState = 1;
+    swing.meleeWeaponAnimation = 4;
+    interpolator.Push(swing, 2000);
+    PlayerSnapshotMessage idle = Snapshot(11, 60.0f);
+    interpolator.Push(idle, 2010);
+
+    // The interpolation target has reached the short action edge even though the latest packet is already idle.
+    assert(interpolator.Sample(2110, sampled));
+    assert(sampled.meleeWeaponState == swing.meleeWeaponState);
+    assert(sampled.meleeWeaponAnimation == swing.meleeWeaponAnimation);
+    assert(sampled.buttonItem == swing.buttonItem);
+    assert(sampled.itemAction == swing.itemAction);
+    assert(sampled.heldItemAction == swing.heldItemAction);
+    assert(sampled.modelGroup == swing.modelGroup);
+
+    assert(interpolator.Sample(2311, sampled));
+    assert(sampled.meleeWeaponState == 0);
+
     std::cout << "HyruleCoop player interpolation tests passed\n";
     return 0;
 }

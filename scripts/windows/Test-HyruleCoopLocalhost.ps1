@@ -6,17 +6,51 @@ param(
     [int]$UdpDropEvery = 0,
     [int]$UdpDelayMs = 0,
     [switch]$UdpReorderPairs,
+    [ValidateSet("None", "Host", "Client")]
+    [string]$RenderRole = "None",
     [switch]$ExpectBuildMismatch
 )
 
 $ErrorActionPreference = "Stop"
+
+function Set-TestWindowPosition([string] $path, [int] $x) {
+    $config = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    $config.Window.Width = 640
+    $config.Window.Height = 480
+    $config.Window.PositionX = $x
+    $config.Window.PositionY = 40
+    $config.Window.Backend.Id = 1
+    $config.Window.Backend.Name = "DirectX 11"
+    if ($null -eq $config.CVars.gSettings.PSObject.Properties['VsyncEnabled']) {
+        $config.CVars.gSettings | Add-Member -NotePropertyName VsyncEnabled -NotePropertyValue 0
+    } else {
+        $config.CVars.gSettings.VsyncEnabled = 0
+    }
+    $config | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding UTF8
+}
+
+function Read-SharedText([string] $path) {
+    $stream = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                              [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    try {
+        $reader = [IO.StreamReader]::new($stream)
+        try {
+            return $reader.ReadToEnd()
+        } finally {
+            $reader.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "..\.."))
 
 if ([string]::IsNullOrWhiteSpace($ExecutablePath)) {
     $ExecutablePath = Join-Path $repoRoot "x64\Release\soh.exe"
 }
 if ([string]::IsNullOrWhiteSpace($SeedSavePath)) {
-    $SeedSavePath = Join-Path $repoRoot "dist\Hyrule-Coop-PoC-2-Windows\Save\file1.sav"
+    $SeedSavePath = Join-Path $repoRoot "build-poc-mingw\release-seed\file1.sav"
 }
 if ($UdpDropEvery -lt 0 -or $UdpDelayMs -lt 0 -or $UdpDelayMs -gt 1000) {
     throw "UDP impairment values must be non-negative and delay must not exceed 1000 ms."
@@ -30,8 +64,10 @@ $hostExe = Join-Path $hostDir "soh.exe"
 $clientExe = Join-Path $clientDir "soh.exe"
 $hostReport = Join-Path $hostDir "hyrule-coop-localhost-host.tsv"
 $clientReport = Join-Path $clientDir "hyrule-coop-localhost-client.tsv"
+$hostConfig = Join-Path $hostDir "shipofharkinian.json"
+$clientConfig = Join-Path $clientDir "shipofharkinian.json"
 
-foreach ($path in @($ExecutablePath, $SeedSavePath, $hostDir, $clientDir)) {
+foreach ($path in @($ExecutablePath, $SeedSavePath, $hostDir, $clientDir, $hostConfig, $clientConfig)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Required localhost test path is missing: $path"
     }
@@ -49,6 +85,8 @@ Copy-Item -LiteralPath $ExecutablePath -Destination $hostExe -Force
 Copy-Item -LiteralPath $ExecutablePath -Destination $clientExe -Force
 Copy-Item -LiteralPath $SeedSavePath -Destination (Join-Path $hostDir "Save\file1.sav") -Force
 Copy-Item -LiteralPath $SeedSavePath -Destination (Join-Path $clientDir "Save\file1.sav") -Force
+Set-TestWindowPosition $hostConfig 10
+Set-TestWindowPosition $clientConfig 700
 $guestSavePath = Join-Path $clientDir "Save\file1.sav"
 $guestSave = Get-Content -LiteralPath $guestSavePath -Raw | ConvertFrom-Json
 $hostSeedAge = [int]$guestSave.sections.base.data.linkAge
@@ -74,7 +112,8 @@ $savedEnvironment = @{}
 foreach ($name in @("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "HYRULE_COOP_TEST_PORT",
                      "HYRULE_COOP_TEST_REPORT", "HYRULE_COOP_TEST_ROLE", "HYRULE_COOP_TEST_ADDRESS",
                      "HYRULE_COOP_SAVE_DIR", "HYRULE_COOP_TEST_UDP_DROP_EVERY",
-                     "HYRULE_COOP_TEST_UDP_DELAY_MS", "HYRULE_COOP_TEST_UDP_REORDER_PAIRS")) {
+                     "HYRULE_COOP_TEST_UDP_DELAY_MS", "HYRULE_COOP_TEST_UDP_REORDER_PAIRS",
+                     "HYRULE_COOP_TEST_REQUIRE_DRAW")) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
 }
 
@@ -92,19 +131,21 @@ try {
     $env:HYRULE_COOP_TEST_REPORT = $hostReport
     $env:HYRULE_COOP_TEST_ROLE = "host"
     $env:HYRULE_COOP_SAVE_DIR = (Join-Path $hostDir "Save")
-    $hostProcess = Start-Process -FilePath $hostExe -WorkingDirectory $hostDir -WindowStyle Minimized -PassThru
+    $env:HYRULE_COOP_TEST_REQUIRE_DRAW = if ($RenderRole -eq "Host") { "1" } else { "0" }
+    $hostProcess = Start-Process -FilePath $hostExe -WorkingDirectory $hostDir -WindowStyle Normal -PassThru
 
     Start-Sleep -Seconds 2
     $env:HYRULE_COOP_TEST_REPORT = $clientReport
     $env:HYRULE_COOP_TEST_ROLE = "client"
     $env:HYRULE_COOP_SAVE_DIR = (Join-Path $clientDir "Save")
-    $clientProcess = Start-Process -FilePath $clientExe -WorkingDirectory $clientDir -WindowStyle Minimized -PassThru
+    $env:HYRULE_COOP_TEST_REQUIRE_DRAW = if ($RenderRole -eq "Client") { "1" } else { "0" }
+    $clientProcess = Start-Process -FilePath $clientExe -WorkingDirectory $clientDir -WindowStyle Normal -PassThru
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 1
-        $hostText = [IO.File]::ReadAllText($hostReport)
-        $clientText = [IO.File]::ReadAllText($clientReport)
+        $hostText = Read-SharedText $hostReport
+        $clientText = Read-SharedText $clientReport
         if ($ExpectBuildMismatch -and
             $clientText -match "`tFAIL`tThe host and guest are running different builds") {
             $outcome = "EXPECTED_BUILD_REJECTION"
@@ -169,8 +210,8 @@ if ($outcome -ne "PASS") {
     throw "Hyrule Co-op localhost proof failed: $outcome"
 }
 
-$hostText = [IO.File]::ReadAllText($hostReport)
-$clientText = [IO.File]::ReadAllText($clientReport)
+$hostText = Read-SharedText $hostReport
+$clientText = Read-SharedText $clientReport
 $hostBuild = [regex]::Match($hostText, '(?m)^\d+\thost\tconfigured\t.*\bbuild=(\S+)').Groups[1].Value
 $clientBuild = [regex]::Match($clientText, '(?m)^\d+\tclient\tconfigured\t.*\bbuild=(\S+)').Groups[1].Value
 if ([string]::IsNullOrWhiteSpace($hostBuild) -or $hostBuild -ne $clientBuild -or
@@ -179,13 +220,24 @@ if ([string]::IsNullOrWhiteSpace($hostBuild) -or $hostBuild -ne $clientBuild -or
 }
 
 $requiredHostEvidence = @(
+    'host\tbunny-hood-client-applied\tremote Player state carries Bunny Hood',
+    'host\tminimap-remote-position-read\tminimap draw consumed the same-scene remote player coordinates',
     'host\tdeku-baba-remote-target-visible\t',
     'host\tdeku-baba-remote-swing-visible\t',
-    'host\tdeku-baba-remote-swing-rendered\t',
+    'host\tdeku-baba-remote-swing-state-applied\t',
+    'host\tgeneric-enemy-client-target-visible\t',
+    'host\tgeneric-enemy-client-swing-visible\t',
+    'host\tgeneric-enemy-client-swing-state-applied\t',
+    'host\tgeneric-enemy-host-damage-accepted\thealth=2 -> health=1',
+    'host\tgeneric-enemy-host-target-acquired\t',
+    'host\tgeneric-enemy-host-sword-state-entered\t',
+    'host\tgeneric-enemy-host-physical-collision\thit=1',
+    'host\tgeneric-enemy-target-released\t',
+    'host\tgeneric-enemy-dead-synchronized\t',
     'host\tgohma-remote-movement-visible\t',
     'host\tgohma-remote-target-visible\t',
     'host\tgohma-remote-swing-visible\t',
-    'host\tgohma-remote-swing-rendered\t',
+    'host\tgohma-remote-swing-state-applied\t',
     'host\tgohma-host-target-acquired\t',
     'host\tgohma-host-damage-accepted\thit=1 health=1',
     'host\tgohma-host-damage-accepted\thit=2 health=0',
@@ -193,9 +245,20 @@ $requiredHostEvidence = @(
     'host\thost-campaign-save-complete\t'
 )
 $requiredClientEvidence = @(
+    'client\tbunny-hood-host-applied\tremote Player state carries Bunny Hood',
+    'client\tminimap-remote-position-read\tminimap draw consumed the same-scene remote player coordinates',
     'client\tdeku-baba-target-acquired\t',
     'client\tdeku-baba-sword-state-entered\t',
     'client\tdeku-baba-physical-collision\t',
+    'client\tgeneric-enemy-client-target-acquired\t',
+    'client\tgeneric-enemy-client-sword-state-entered\t',
+    'client\tgeneric-enemy-client-physical-collision\thit=1',
+    'client\tgeneric-enemy-client-damage-synchronized\thealth=2 -> health=1',
+    'client\tgeneric-enemy-host-target-visible\t',
+    'client\tgeneric-enemy-host-swing-visible\t',
+    'client\tgeneric-enemy-host-swing-state-applied\t',
+    'client\tgeneric-enemy-target-released\t',
+    'client\tgeneric-enemy-dead-synchronized\t',
     'client\tgohma-local-movement-verified\t',
     'client\tgohma-target-acquired\t',
     'client\tgohma-sword-state-entered\t',
@@ -206,6 +269,20 @@ $requiredClientEvidence = @(
     'client\tgohma-post-death-attack-rejected\t',
     'client\tguest-save-protection-complete\t'
 )
+if ($RenderRole -eq "Host") {
+    $requiredHostEvidence += @(
+        'host\tbunny-hood-client-draw-completed\tPlayer_Draw completed with Bunny Hood state',
+        'host\tdeku-baba-remote-swing-draw-completed\tPlayer_Draw completed with the guest sword state',
+        'host\tgeneric-enemy-client-swing-draw-completed\tPlayer_Draw completed with the remote sword state',
+        'host\tgohma-remote-swing-draw-completed\tPlayer_Draw completed with the guest sword state'
+    )
+}
+if ($RenderRole -eq "Client") {
+    $requiredClientEvidence += @(
+        'client\tbunny-hood-host-draw-completed\tPlayer_Draw completed with Bunny Hood state',
+        'client\tgeneric-enemy-host-swing-draw-completed\tPlayer_Draw completed with the remote sword state'
+    )
+}
 foreach ($pattern in $requiredHostEvidence) {
     if ($hostText -notmatch $pattern) {
         throw "Hyrule Co-op localhost proof is missing host gameplay evidence: $pattern"
@@ -230,13 +307,25 @@ $guestSave.sections.base.data.equips.equipment = $guestData.equips.equipment
 $guestSave.sections.base.data.inventory.equipment = $guestData.inventory.equipment
 $normalizedGuestData = $guestSave.sections.base.data | ConvertTo-Json -Depth 100 -Compress
 $savedGuestData = $guestData | ConvertTo-Json -Depth 100 -Compress
+$hostResourceMatch = [regex]::Match(
+    $hostText,
+    '(?m)^\d+\thost\thost-awaiting-client-reconnect\trupees=(\d+) arrows=(\d+) magic=(\d+)\r?$'
+)
+if (-not $hostResourceMatch.Success) {
+    throw "Host reconnect checkpoint did not report its local resource baseline."
+}
+$expectedHostRupees = [int]$hostResourceMatch.Groups[1].Value
+$expectedHostArrows = [int]$hostResourceMatch.Groups[2].Value
+$expectedHostMagic = [int]$hostResourceMatch.Groups[3].Value
 $forestScene = 0x55
 $collectibleMask = [uint32](1 -shl 0x1E)
 $switchMask = [Convert]::ToUInt32("80000000", 16)
 if ([int]$hostData.inventory.items[9] -eq 255 -or [int]$hostData.inventory.items[11] -eq 255 -or
     (([uint32]$hostData.sceneFlags[$forestScene].collect -band $collectibleMask) -eq 0) -or
     (([uint32]$hostData.sceneFlags[$forestScene].swch -band $switchMask) -eq 0) -or
-    [int]$hostData.rupees -ne 111 -or [int]$hostData.linkAge -ne $hostSeedAge) {
+    [int]$hostData.rupees -ne $expectedHostRupees -or
+    [int]$hostData.inventory.ammo[3] -ne $expectedHostArrows -or
+    [int]$hostData.magic -ne $expectedHostMagic -or [int]$hostData.linkAge -ne $hostSeedAge) {
     throw "Host save did not persist the canonical co-op campaign and host-local resources."
 }
 if ([int]$guestData.rupees -ne $guestStartingRupees -or [int]$guestData.linkAge -ne $guestStartingAge -or
@@ -246,8 +335,12 @@ if ([int]$guestData.rupees -ne $guestStartingRupees -or [int]$guestData.linkAge 
 Write-Host "Host-owned campaign persistence: PASS"
 Write-Host "Guest personal save protection: PASS"
 
-Write-Host "Hyrule Co-op localhost proof: PASS"
+Write-Host "Hyrule Co-op two-instance deterministic gameplay proof: PASS"
+Write-Host "Combat coverage: specialized Deku Baba and Gohma adapters plus ordinary Keese bidirectional damage/death"
 Write-Host "Exact build fingerprint: $hostBuild"
+if ($RenderRole -ne "None") {
+    Write-Host "Role-specific Player_Draw proof: $RenderRole"
+}
 if ($UdpDropEvery -ne 0 -or $UdpDelayMs -ne 0 -or $UdpReorderPairs) {
     Write-Host "UDP impairment: drop every $UdpDropEvery, delay $UdpDelayMs ms, reorder pairs $($UdpReorderPairs.IsPresent)"
 }
