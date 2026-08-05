@@ -234,6 +234,7 @@ $requiredHostEvidence = @(
     'host\tgeneric-enemy-host-physical-collision\thit=1',
     'host\tgeneric-enemy-target-released\t',
     'host\tgeneric-enemy-dead-synchronized\t',
+    'host\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags',
     'host\tgohma-remote-movement-visible\t',
     'host\tgohma-remote-target-visible\t',
     'host\tgohma-remote-swing-visible\t',
@@ -259,6 +260,7 @@ $requiredClientEvidence = @(
     'client\tgeneric-enemy-host-swing-state-applied\t',
     'client\tgeneric-enemy-target-released\t',
     'client\tgeneric-enemy-dead-synchronized\t',
+    'client\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags',
     'client\tgohma-local-movement-verified\t',
     'client\tgohma-target-acquired\t',
     'client\tgohma-sword-state-entered\t',
@@ -321,6 +323,10 @@ $forestScene = 0x55
 $collectibleMask = [uint32](1 -shl 0x1E)
 $switchMask = [Convert]::ToUInt32("80000000", 16)
 if ([int]$hostData.inventory.items[9] -eq 255 -or [int]$hostData.inventory.items[11] -eq 255 -or
+    [int]$hostData.inventory.items[18] -eq 255 -or [int]$hostData.inventory.items[19] -eq 255 -or
+    (([uint32]$hostData.inventory.upgrades -band 0xE00) -lt 0x200) -or
+    (([uint16]$hostData.itemGetInf[0] -band 0x1000) -eq 0) -or
+    (([uint16]$hostData.eventChkInf[3] -band 0x030A) -ne 0x030A) -or
     (([uint32]$hostData.sceneFlags[$forestScene].collect -band $collectibleMask) -eq 0) -or
     (([uint32]$hostData.sceneFlags[$forestScene].swch -band $switchMask) -eq 0) -or
     [int]$hostData.rupees -ne $expectedHostRupees -or

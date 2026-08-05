@@ -2602,7 +2602,7 @@ void Manager::UpdateAutomatedTest() {
             WarpAutomatedTestToForest();
             SetAutomatedTestStage(TestAwaitingScene, "warp-requested");
             return;
-        case TestAwaitingScene:
+        case TestAwaitingScene: {
             if (!IsSaveLoaded() || gPlayState->sceneNum != SCENE_KOKIRI_FOREST ||
                 automatedTestTick - automatedTestStageTick < 30) {
                 return;
@@ -2613,7 +2613,20 @@ void Manager::UpdateAutomatedTest() {
             gPlayState->actorCtx.flags.collect &= ~collectibleMask;
             gSaveContext.sceneFlags[SCENE_KOKIRI_FOREST].swch &= ~switchMask;
             gPlayState->actorCtx.flags.swch &= ~switchMask;
-            GameInteractor::RawAction::UnsetFlag(FLAG_EVENT_CHECK_INF, EVENTCHKINF_KING_ZORA_MOVED);
+            const auto clearEventFlag = [](int16_t flag) {
+                gSaveContext.eventChkInf[flag >> 4] &=
+                    static_cast<uint16_t>(~(1u << (flag & 0xF)));
+            };
+            clearEventFlag(EVENTCHKINF_OBTAINED_RUTOS_LETTER);
+            clearEventFlag(EVENTCHKINF_KING_ZORA_MOVED);
+            clearEventFlag(EVENTCHKINF_OBTAINED_SILVER_SCALE);
+            clearEventFlag(EVENTCHKINF_OPENED_ZORAS_DOMAIN);
+            gSaveContext.itemGetInf[ITEMGETINF_0C >> 4] &=
+                static_cast<uint16_t>(~(1u << (ITEMGETINF_0C & 0xF)));
+            for (int index = 0; index < 4; ++index) {
+                gSaveContext.inventory.items[SLOT_BOTTLE_1 + index] = ITEM_NONE;
+            }
+            gSaveContext.inventory.upgrades &= gUpgradeNegMasks[UPG_SCALE];
             gSaveContext.inventory.items[SLOT_HOOKSHOT] = ITEM_NONE;
             gSaveContext.inventory.items[SLOT_FARORES_WIND] = ITEM_NONE;
             gSaveContext.itemGetInf[ITEMGETINF_18_19_1A_INDEX] &= ~ITEMGETINF_18_MASK;
@@ -2638,6 +2651,15 @@ void Manager::UpdateAutomatedTest() {
                     ~(1u << (EVENTCHKINF_KING_ZORA_MOVED & 0xF));
             }
             if (!automatedTestClient) {
+                // Reproduce the pre-updater corruption observed in a real campaign: both reward flags survived,
+                // but the Ruto bottle, scale upgrade, and King Zora consequence did not.
+                gSaveContext.itemGetInf[ITEMGETINF_0C >> 4] |=
+                    static_cast<uint16_t>(1u << (ITEMGETINF_0C & 0xF));
+                gSaveContext.eventChkInf[EVENTCHKINF_OBTAINED_RUTOS_LETTER >> 4] |=
+                    static_cast<uint16_t>(1u << (EVENTCHKINF_OBTAINED_RUTOS_LETTER & 0xF));
+                gSaveContext.eventChkInf[EVENTCHKINF_OBTAINED_SILVER_SCALE >> 4] |=
+                    static_cast<uint16_t>(1u << (EVENTCHKINF_OBTAINED_SILVER_SCALE & 0xF));
+                gSaveContext.inventory.items[SLOT_BOTTLE_1] = ITEM_BOTTLE;
                 CaptureCanonicalProgression();
                 ++progressionRevision;
                 SendProgressionSnapshot();
@@ -2648,6 +2670,7 @@ void Manager::UpdateAutomatedTest() {
             }
             SetAutomatedTestStage(TestAwaitingActors, "forest-loaded");
             return;
+        }
         case TestAwaitingActors: {
             // Keep the presentation stable long enough for both peers to observe it before the guest equips a sword,
             // which legitimately clears masks and would otherwise make this bidirectional proof timing-dependent.
@@ -2992,6 +3015,19 @@ void Manager::UpdateAutomatedTest() {
             if (!hookshotShared || !swordShared || !faroresWindShared) {
                 return;
             }
+            const size_t bottleCount = std::count_if(
+                &gSaveContext.inventory.items[SLOT_BOTTLE_1],
+                &gSaveContext.inventory.items[SLOT_BOTTLE_4 + 1],
+                [](uint8_t item) { return item != ITEM_NONE; });
+            const bool durableRewardsRepaired = bottleCount >= 2 && CUR_UPG_VALUE(UPG_SCALE) >= 1 &&
+                                                Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_RUTOS_LETTER) &&
+                                                Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) &&
+                                                Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_SILVER_SCALE) &&
+                                                !Inventory_HasSpecificBottle(ITEM_LETTER_RUTO);
+            if (!durableRewardsRepaired) {
+                FailAutomatedTest("derived bottle, Ruto hand-in, and Silver Scale progression was not repaired");
+                return;
+            }
             if (automatedTestClient &&
                 (!remotePlayerSnapshot.has_value() || gSaveContext.linkAge != remotePlayerSnapshot->linkAge)) {
                 FailAutomatedTest("guest did not adopt the host save's Link age");
@@ -3006,6 +3042,8 @@ void Manager::UpdateAutomatedTest() {
             }
             ReportAutomatedTest("shared-progression-synchronized",
                                 "Hookshot, Kokiri Sword, and Farore's Wind shared; rupees, arrows, and current magic remained local");
+            ReportAutomatedTest("derived-progression-repaired",
+                                "Cucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags");
             SetAutomatedTestStage(TestAwaitingWorldState, "global-world-state-test-started");
             return;
         }
@@ -3013,11 +3051,11 @@ void Manager::UpdateAutomatedTest() {
             if (!automatedTestWorldStateTriggered) {
                 automatedTestWorldStateTriggered = true;
                 if (automatedTestClient) {
-                    Flags_SetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED);
+                    Flags_SetEventChkInf(EVENTCHKINF_OPENED_ZORAS_DOMAIN);
                     applyingAuthoritativeState = true;
-                    GameInteractor::RawAction::UnsetFlag(FLAG_EVENT_CHECK_INF, EVENTCHKINF_KING_ZORA_MOVED);
+                    GameInteractor::RawAction::UnsetFlag(FLAG_EVENT_CHECK_INF, EVENTCHKINF_OPENED_ZORAS_DOMAIN);
                     applyingAuthoritativeState = false;
-                    ReportAutomatedTest("guest-world-state-intent-sent", "King Zora moved flag 0x33");
+                    ReportAutomatedTest("guest-world-state-intent-sent", "Zora's Domain opened flag 0x39");
                 } else {
                     Flags_SetSwitch(gPlayState, kAutomatedTestSwitchFlag);
                     ReportAutomatedTest("host-scene-switch-set", "live Kokiri Forest switch 0x1F");
@@ -3025,11 +3063,12 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             if (!Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) ||
+                !Flags_GetEventChkInf(EVENTCHKINF_OPENED_ZORAS_DOMAIN) ||
                 (gSaveContext.sceneFlags[SCENE_KOKIRI_FOREST].swch & switchMask) == 0) {
                 return;
             }
             ReportAutomatedTest("global-world-state-synchronized",
-                                "King Zora moved flag and host live scene switch replayed across peers");
+                                "derived King Zora state, Zora's Domain opening, and host live scene switch replayed across peers");
             if (!automatedTestClient) {
                 BeginAutomatedBossBarrier();
             }
@@ -3379,7 +3418,15 @@ void Manager::UpdateAutomatedTest() {
             const bool swordShared =
                 CHECK_OWNED_EQUIP(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_KOKIRI) != 0;
             const bool bossClear = (gSaveContext.sceneFlags[SCENE_DEKU_TREE_BOSS].clear & kGohmaRoomMask) != 0;
-            const bool worldState = Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) != 0;
+            const size_t bottleCount = std::count_if(
+                &gSaveContext.inventory.items[SLOT_BOTTLE_1],
+                &gSaveContext.inventory.items[SLOT_BOTTLE_4 + 1],
+                [](uint8_t item) { return item != ITEM_NONE; });
+            const bool worldState = Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) &&
+                                    Flags_GetEventChkInf(EVENTCHKINF_OPENED_ZORAS_DOMAIN) &&
+                                    Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_RUTOS_LETTER) &&
+                                    Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_SILVER_SCALE) &&
+                                    bottleCount >= 2 && CUR_UPG_VALUE(UPG_SCALE) >= 1;
             int16_t expectedRupees = automatedTestHostReconnectRupees;
             int8_t expectedArrows = automatedTestHostReconnectArrows;
             int8_t expectedMagic = automatedTestHostReconnectMagic;

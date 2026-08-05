@@ -15,6 +15,72 @@ namespace {
 
 constexpr size_t kDurableItemCount = 18;
 constexpr size_t kBottleCount = 4;
+constexpr uint32_t kScaleMask = 0x00000E00;
+constexpr uint8_t kScaleShift = 9;
+
+bool HasPackedFlag(const uint16_t* flags, uint16_t flag) {
+    return (flags[flag >> 4] & (1u << (flag & 0xF))) != 0;
+}
+
+void SetPackedFlag(uint16_t* flags, uint16_t flag) {
+    flags[flag >> 4] |= static_cast<uint16_t>(1u << (flag & 0xF));
+}
+
+size_t CountOwnedBottles(const SaveContext* saveContext) {
+    size_t count = 0;
+    for (size_t index = 0; index < kBottleCount; ++index) {
+        if (saveContext->inventory.items[SLOT_BOTTLE_1 + index] != ITEM_NONE) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+void ReconcileDurableRewardInvariants(SaveContext* saveContext) {
+    const bool obtainedRutosLetter =
+        HasPackedFlag(saveContext->eventChkInf, EVENTCHKINF_OBTAINED_RUTOS_LETTER);
+    const bool hasRutosLetter = std::any_of(
+        &saveContext->inventory.items[SLOT_BOTTLE_1],
+        &saveContext->inventory.items[SLOT_BOTTLE_1 + kBottleCount],
+        [](uint8_t item) { return item == ITEM_LETTER_RUTO; });
+
+    // Outside randomized/open-fountain starts, the letter can leave the
+    // inventory only by being handed to King Zora.
+    if (obtainedRutosLetter && !hasRutosLetter) {
+        SetPackedFlag(saveContext->eventChkInf, EVENTCHKINF_KING_ZORA_MOVED);
+    }
+
+    if (HasPackedFlag(saveContext->eventChkInf, EVENTCHKINF_KING_ZORA_MOVED)) {
+        for (size_t index = 0; index < kBottleCount; ++index) {
+            uint8_t& item = saveContext->inventory.items[SLOT_BOTTLE_1 + index];
+            if (item == ITEM_LETTER_RUTO) {
+                item = ITEM_BOTTLE;
+            }
+        }
+    }
+
+    size_t requiredBottles = 0;
+    requiredBottles += HasPackedFlag(saveContext->itemGetInf, ITEMGETINF_0C) ? 1 : 0;
+    requiredBottles += HasPackedFlag(saveContext->itemGetInf, ITEMGETINF_TALON_BOTTLE) ? 1 : 0;
+    requiredBottles += obtainedRutosLetter ? 1 : 0;
+
+    size_t ownedBottles = CountOwnedBottles(saveContext);
+    for (size_t index = 0; index < kBottleCount && ownedBottles < requiredBottles; ++index) {
+        uint8_t& item = saveContext->inventory.items[SLOT_BOTTLE_1 + index];
+        if (item == ITEM_NONE) {
+            item = ITEM_BOTTLE;
+            ++ownedBottles;
+        }
+    }
+
+    const bool obtainedSilverScale =
+        HasPackedFlag(saveContext->eventChkInf, EVENTCHKINF_OBTAINED_SILVER_SCALE);
+    const uint32_t scaleLevel = (saveContext->inventory.upgrades & kScaleMask) >> kScaleShift;
+    if (obtainedSilverScale && scaleLevel == 0) {
+        saveContext->inventory.upgrades =
+            (saveContext->inventory.upgrades & ~kScaleMask) | (1u << kScaleShift);
+    }
+}
 
 uint8_t DurableMagicLevel(const SaveContext* saveContext) {
     if (saveContext->isDoubleMagicAcquired) {
@@ -156,13 +222,14 @@ void ApplySharedProgression(void* saveContextRef, const SharedProgressionState& 
     saveContext->bgsFlag = state.bgsFlag;
     saveContext->inventory.gsTokens = state.gsTokens;
     std::copy(state.eventChkInf.begin(), state.eventChkInf.end(), std::begin(saveContext->eventChkInf));
-    ReconcileSpellAcquisitionFlags(saveContext);
+    ReconcileSharedProgressionDerivedFlags(saveContext);
 }
 
 void ReconcileSharedProgressionDerivedFlags(void* saveContextRef) {
     SaveContext* saveContext = static_cast<SaveContext*>(saveContextRef);
     if (saveContext != nullptr) {
         ReconcileSpellAcquisitionFlags(saveContext);
+        ReconcileDurableRewardInvariants(saveContext);
     }
 }
 
