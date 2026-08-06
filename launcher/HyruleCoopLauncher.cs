@@ -13,8 +13,8 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Updates and launches Hyrule Co-op")]
 [assembly: AssemblyCompany("Hyrule Co-op contributors")]
 [assembly: AssemblyProduct("Hyrule Co-op")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace HyruleCoop.Launcher {
     internal sealed class LauncherOptions {
@@ -129,7 +129,7 @@ namespace HyruleCoop.Launcher {
     }
 
     internal static class Program {
-        public const string LauncherVersion = "1.1.0";
+        public const string LauncherVersion = "1.1.1";
 
         [STAThread]
         private static int Main(string[] args) {

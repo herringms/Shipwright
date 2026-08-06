@@ -11,12 +11,12 @@ using System.Windows.Forms;
 [assembly: AssemblyDescription("Hyrule Co-op bootstrap launcher")]
 [assembly: AssemblyCompany("Hyrule Co-op contributors")]
 [assembly: AssemblyProduct("Hyrule Co-op")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyVersion("1.1.1.0")]
+[assembly: AssemblyFileVersion("1.1.1.0")]
 
 namespace HyruleCoop.Bootstrap {
     internal static class Program {
-        private const string EmbeddedVersion = "1.1.0";
+        private const string EmbeddedVersion = "1.1.1";
         private const string EmbeddedLauncherResource = "HyruleCoop.EmbeddedLauncher";
         private const string EmbeddedConfigurationResource = "HyruleCoop.DefaultConfig";
 

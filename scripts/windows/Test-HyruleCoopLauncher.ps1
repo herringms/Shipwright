@@ -80,7 +80,7 @@ function New-TestRelease {
         compatibilityId = "hyrule-coop-poc.3"
         assetSchema = $AssetSchema
         minimumLauncherVersion = "1.0.0"
-        launcherVersion = "1.1.0"
+        launcherVersion = "1.1.1"
         launcherUrl = ""
         launcherSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $launcherExe).Hash
         runtimeUrl = $(if ($Bootstrap) { "" } else { $archivePath })
@@ -259,7 +259,7 @@ try {
         throw "Unsafe launcher version metadata escaped its versioned launcher directory."
     }
 
-    $release2.Manifest.launcherVersion = "1.1.0"
+    $release2.Manifest.launcherVersion = "1.1.1"
     $release2.Manifest.launcherUrl = ""
     $release2.Manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $release2Manifest -Encoding UTF8
 
@@ -282,6 +282,21 @@ try {
     if (-not $assetMetadata.regenerationRequired -or $assetMetadata.assetSchema -ne 2 -or
         $assetMetadata.generatedAssetSchema -ne 1) {
         throw "Launcher did not retain the O2R schema and report required regeneration."
+    }
+
+    $imguiPath = Join-Path $appDataRoot "Runtime\launcher-smoke-2\imgui.ini"
+    [IO.File]::WriteAllText($imguiPath, "[Window][Hyrule Co-op]`nPos=10,10")
+    $runtimeConfigPath = Join-Path $appDataRoot "Runtime\launcher-smoke-2\shipofharkinian.json"
+    [IO.File]::WriteAllText($runtimeConfigPath, '{"generated":true}')
+    $runtimeModsPath = Join-Path $appDataRoot "Runtime\launcher-smoke-2\mods\custom_mod_files_go_here.txt"
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $runtimeModsPath)) | Out-Null
+    [IO.File]::WriteAllText($runtimeModsPath, "")
+    Invoke-TestLauncher -Arguments @("--delegated", "--headless", "--no-launch", "--skip-import", "--root",
+        ('"' + $appDataRoot + '"'), "--bootstrap-root", ('"' + $bootstrapRoot + '"'), "--offline")
+    if ((Get-Content -LiteralPath (Join-Path $appDataRoot "current-runtime.txt") -Raw).Trim() -ne
+        "launcher-smoke-2" -or -not (Test-Path -LiteralPath $imguiPath) -or
+        -not (Test-Path -LiteralPath $runtimeConfigPath) -or -not (Test-Path -LiteralPath $runtimeModsPath)) {
+        throw "Launcher rejected player-owned files generated beside a verified runtime."
     }
 
     [IO.File]::AppendAllText((Join-Path $appDataRoot "Runtime\launcher-smoke-2\soh.exe"), "corrupt")

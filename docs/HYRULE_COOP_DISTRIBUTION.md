@@ -23,6 +23,9 @@ account are not required.
 Updates carry the complete managed runtime as one tested set: the executable, port archive, extractor archive,
 runtime DLLs, controller database, and package instructions. This prevents a new executable from being combined with
 stale support files. The updater never replaces the player's initial or expanded configuration.
+Versioned runtime files remain manifest-locked. Player-owned paths are forbidden from release manifests and tolerated
+if Shipwright creates them beside the executable, including `imgui.ini`, configuration, logs, saves, mods, generated
+O2Rs, and ROMs. This does not weaken hash verification of any managed runtime file.
 
 The updater verifies every managed payload file and preserves these installation-local personal paths:
 

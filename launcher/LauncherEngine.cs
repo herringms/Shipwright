@@ -612,7 +612,8 @@ namespace HyruleCoop.Launcher {
                 }
                 string relative = fullPath.Substring(root.Length).Replace('\\', '/');
                 if (!expected.Contains(relative) &&
-                    !String.Equals(relative, "hyrule-coop-release.json", StringComparison.OrdinalIgnoreCase)) {
+                    !String.Equals(relative, "hyrule-coop-release.json", StringComparison.OrdinalIgnoreCase) &&
+                    !IsPlayerOwnedPath(relative)) {
                     throw new InvalidDataException("The runtime contains an unmanaged file: " + relative);
                 }
             }
@@ -1095,7 +1096,8 @@ namespace HyruleCoop.Launcher {
             string normalized = path.Replace('\\', '/').TrimStart('/').ToLowerInvariant();
             string first = normalized.Split('/')[0];
             return first == "save" || first == "mods" || first == "logs" || first == "userdata" ||
-                   first == "shipofharkinian.json" || first == "oot.o2r" || first == "oot-mq.o2r" ||
+                   first == "shipofharkinian.json" || first == "imgui.ini" || first == "oot.o2r" ||
+                   first == "oot-mq.o2r" ||
                    normalized.EndsWith(".z64") || normalized.EndsWith(".n64") || normalized.EndsWith(".v64") ||
                    normalized.EndsWith(".sav");
         }
