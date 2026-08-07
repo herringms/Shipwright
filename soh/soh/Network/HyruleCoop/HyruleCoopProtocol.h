@@ -12,7 +12,7 @@
 namespace HyruleCoop {
 
 constexpr uint32_t kPacketMagic = 0x48434F50; // HCOP
-constexpr uint16_t kProtocolVersion = 6;
+constexpr uint16_t kProtocolVersion = 9;
 constexpr size_t kHeaderSize = 24;
 constexpr uint32_t kMaximumPayloadSize = 1024 * 1024;
 constexpr size_t kMaximumActorAdapterWords = 64;
@@ -131,6 +131,7 @@ struct PlayerSnapshotMessage {
     int16_t room = -1;
     int32_t entrance = 0;
     int32_t linkAge = 0;
+    int16_t sceneLayer = -1;
     float position[3] = {};
     int16_t rotation[3] = {};
     std::array<int16_t, 72> joints = {};
@@ -206,8 +207,11 @@ struct SceneFlagsSnapshotMessage {
     int16_t scene = -1;
     uint32_t chest = 0;
     uint32_t switches = 0;
+    uint32_t tempSwitches = 0;
     uint32_t clear = 0;
+    uint32_t tempClear = 0;
     uint32_t collectible = 0;
+    uint32_t tempCollectible = 0;
 };
 
 struct ActorSnapshotMessage {

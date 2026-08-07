@@ -1,5 +1,8 @@
 #include "soh/Network/HyruleCoop/HyruleCoopProtocol.h"
+#include "soh/Network/HyruleCoop/RemotePlayerRoomPolicy.h"
+#include "soh/Network/HyruleCoop/StalchildPolicy.h"
 
+#include <array>
 #include <cassert>
 #include <iostream>
 
@@ -82,6 +85,7 @@ static void TestPlayerSnapshot() {
     player.room = 2;
     player.entrance = 0x1234;
     player.linkAge = 1;
+    player.sceneLayer = 3;
     player.position[0] = 10.25f;
     player.position[1] = -3.5f;
     player.position[2] = 999.0f;
@@ -109,6 +113,8 @@ static void TestPlayerSnapshot() {
     assert(decoded->scene == player.scene);
     assert(decoded->room == player.room);
     assert(decoded->entrance == player.entrance);
+    assert(decoded->linkAge == player.linkAge);
+    assert(decoded->sceneLayer == player.sceneLayer);
     assert(decoded->position[0] == player.position[0]);
     assert(decoded->position[1] == player.position[1]);
     assert(decoded->rotation[1] == player.rotation[1]);
@@ -127,6 +133,54 @@ static void TestPlayerSnapshot() {
     std::vector<uint8_t> truncated = EncodePlayerSnapshot(player);
     truncated.pop_back();
     assert(!DecodePlayerSnapshot(truncated).has_value());
+}
+
+static void TestRemotePlayerRoomLifecycle() {
+    struct RemoteActor {
+        int16_t room = -1;
+        bool live = false;
+    };
+
+    std::array<RemoteActor, 9> actors{};
+    size_t actorCount = 0;
+    const std::array<int16_t, 9> visitedRooms{ 1, 14, 3, 13, 3, 2, 3, 14, 1 };
+
+    for (const int16_t activeRoom : visitedRooms) {
+        // OnSceneSpawnActors drops the cached pointer because the engine may have deleted the prior actor. The
+        // lifecycle reconciliation must retain only a same-room remote actor before deciding whether to spawn one.
+        RemoteActor* survivor = nullptr;
+        for (size_t index = 0; index < actorCount; ++index) {
+            RemoteActor& actor = actors[index];
+            if (!actor.live) {
+                continue;
+            }
+            if (survivor == nullptr && IsRemotePlayerActorInActiveRoom(actor.room, activeRoom)) {
+                survivor = &actor;
+            } else {
+                actor.live = false;
+            }
+        }
+        if (survivor == nullptr) {
+            actors[actorCount++] = { activeRoom, true };
+        }
+
+        size_t liveActors = 0;
+        for (size_t index = 0; index < actorCount; ++index) {
+            liveActors += actors[index].live ? 1 : 0;
+        }
+        assert(liveActors == 1);
+    }
+
+    assert(!IsRemotePlayerActorInActiveRoom(-1, visitedRooms.back()));
+    const TimelineScope childDay{ 0, 0 };
+    const TimelineScope childNight{ 0, 1 };
+    const TimelineScope adultDay{ 1, 2 };
+    assert(IsRemotePlayerVisibleInRoom(2, 14, 2, 14, childDay, childDay));
+    assert(!IsRemotePlayerVisibleInRoom(2, 14, 2, 3, childDay, childDay));
+    assert(!IsRemotePlayerVisibleInRoom(2, 14, 3, 14, childDay, childDay));
+    assert(!IsRemotePlayerVisibleInRoom(2, 14, 2, 14, childDay, childNight));
+    assert(!IsRemotePlayerVisibleInRoom(2, 14, 2, 14, childDay, adultDay));
+    assert(!IsSameTimeline(childDay, TimelineScope{ -1, 0 }));
 }
 
 static void TestPlayerPresentation() {
@@ -191,16 +245,28 @@ static void TestWorldStateMessages() {
     assert(decodedIntent->flag == 31);
     assert(!decodedIntent->set);
 
-    SceneFlagsSnapshotMessage flags{ { 90, 9 }, 19, 8, 0x80000001, 0x01020304, 0x10203040,
-                                     0xA5A5A5A5 };
+    // Jabu-Jabu's switch doors use temporary scene-switch flags 0x39/0x3C. FLAG_SCENE_SWITCH is zero in the
+    // engine, but keep this protocol test independent of gameplay-only flag headers.
+    SceneFlagIntentMessage temporarySwitch{ { 90, 9 }, 2, 78, 4, 0, 0x39, true };
+    const auto decodedTemporarySwitch = DecodeSceneFlagIntent(EncodeSceneFlagIntent(temporarySwitch));
+    assert(decodedTemporarySwitch.has_value());
+    assert(decodedTemporarySwitch->flagType == 0);
+    assert(decodedTemporarySwitch->flag == 0x39);
+    assert(decodedTemporarySwitch->set);
+
+    SceneFlagsSnapshotMessage flags{ { 90, 9 }, 19, 8, 0x80000001, 0x01020304, 0x12000000, 0x10203040,
+                                     0x55667788, 0xA5A5A5A5, 0xCC33CC33 };
     const auto decodedFlags = DecodeSceneFlagsSnapshot(EncodeSceneFlagsSnapshot(flags));
     assert(decodedFlags.has_value());
     assert(decodedFlags->revision == 19);
     assert(decodedFlags->scene == 8);
     assert(decodedFlags->chest == 0x80000001);
     assert(decodedFlags->switches == 0x01020304);
+    assert(decodedFlags->tempSwitches == 0x12000000);
     assert(decodedFlags->clear == 0x10203040);
+    assert(decodedFlags->tempClear == 0x55667788);
     assert(decodedFlags->collectible == 0xA5A5A5A5);
+    assert(decodedFlags->tempCollectible == 0xCC33CC33);
 }
 
 static void TestActorSnapshot() {
@@ -261,6 +327,12 @@ static void TestCoordinationMessages() {
     state.targetScene = 17;
     state.targetRoom = 1;
     state.targetEntrance = 0x1234;
+    state.targetLinkAge = 1;
+    state.targetSceneLayer = 3;
+    state.targetDayTime = 0x8000;
+    state.targetSkyboxTime = 0x8010;
+    state.targetTimeSpeed = 3;
+    state.targetNight = 1;
     state.deadlineTick = 500;
     state.participants = { 1, 2 };
     state.readyParticipants = { 1 };
@@ -269,6 +341,12 @@ static void TestCoordinationMessages() {
     assert(barrier->state.operationEpoch == 20);
     assert(barrier->state.scope == state.scope);
     assert(barrier->state.targetEntrance == state.targetEntrance);
+    assert(barrier->state.targetLinkAge == state.targetLinkAge);
+    assert(barrier->state.targetSceneLayer == state.targetSceneLayer);
+    assert(barrier->state.targetDayTime == state.targetDayTime);
+    assert(barrier->state.targetSkyboxTime == state.targetSkyboxTime);
+    assert(barrier->state.targetTimeSpeed == state.targetTimeSpeed);
+    assert(barrier->state.targetNight == state.targetNight);
     assert(barrier->state.participants == state.participants);
 
     BarrierReadyMessage ready{ { 90, 4 }, 20, 2, 17, 1 };
@@ -367,17 +445,96 @@ static void TestInvalidPacket() {
     assert(error == "unsupported protocol version");
 }
 
+static void TestDynamicStalchildLifecycle() {
+    DynamicStalchildIdentityRegistry identities;
+    const int hostActorOne = 1;
+    const int hostActorTwo = 2;
+    const uint64_t firstId = identities.GetOrAssign(&hostActorOne);
+    const uint64_t secondId = identities.GetOrAssign(&hostActorTwo);
+    assert(IsDynamicStalchildEntityId(firstId));
+    assert(IsDynamicStalchildEntityId(secondId));
+    assert(firstId != secondId);
+    assert(identities.Find(&hostActorOne) == firstId);
+    identities.Forget(&hostActorOne);
+    assert(identities.Find(&hostActorOne) == 0);
+
+    // Guest field spawners must be stopped before their native while-loop runs. Other encounter types remain native.
+    const uint16_t stalchildParams = static_cast<uint16_t>(kStalchildSpawnerType << kEncounterSpawnerTypeShift);
+    assert(ShouldSuppressGuestStalchildSpawner(true, true, stalchildParams));
+    assert(!ShouldSuppressGuestStalchildSpawner(false, true, stalchildParams));
+    assert(!ShouldSuppressGuestStalchildSpawner(true, false, stalchildParams));
+    assert(!ShouldSuppressGuestStalchildSpawner(true, true, 0));
+
+    const uint16_t guestTargetState = EncodeStalchildState(true, StalchildTarget::Guest, 37);
+    assert(IsStalchildTargetable(guestTargetState));
+    assert(DecodeStalchildTarget(guestTargetState) == StalchildTarget::Guest);
+    assert(DecodeStalchildAttackSequence(guestTargetState) == 37);
+    assert(DecodeStalchildAttackSequence(
+               EncodeStalchildState(false, StalchildTarget::Host, kStalchildStateAttackSequenceMask + 1)) ==
+           0);
+    assert(IsNewerStalchildAttackSequence(1, 0));
+    assert(IsNewerStalchildAttackSequence(38, 37));
+    assert(IsNewerStalchildAttackSequence(1, kStalchildStateAttackSequenceMask));
+    assert(!IsNewerStalchildAttackSequence(37, 37));
+    assert(!IsNewerStalchildAttackSequence(36, 37));
+    assert(!IsNewerStalchildAttackSequence(kStalchildStateAttackSequenceMask, 1));
+    assert(!IsStalchildTargetable(EncodeStalchildState(false, StalchildTarget::Host)));
+    assert(SelectStalchildTarget(true, 40000.0f, 100.0f, StalchildTarget::Host, false) ==
+           StalchildTarget::Guest);
+    assert(SelectStalchildTarget(true, 100.0f, 40000.0f, StalchildTarget::Guest, false) ==
+           StalchildTarget::Host);
+    assert(SelectStalchildTarget(true, 40000.0f, 100.0f, StalchildTarget::Host, true) ==
+           StalchildTarget::Host);
+    assert(SelectStalchildTarget(false, 40000.0f, 100.0f, StalchildTarget::Guest, true) ==
+           StalchildTarget::Host);
+    std::array<int16_t, kMaximumActorAdapterWords> stalchildAdapter{};
+    stalchildAdapter[kStalchildAdapterTarget] = static_cast<int16_t>(StalchildTarget::Guest);
+    stalchildAdapter[kStalchildAdapterBehavior] = 3;
+    stalchildAdapter[kStalchildAdapterAttackActive] = 1;
+    stalchildAdapter[kStalchildAdapterShapeYOffset] = -2400;
+    stalchildAdapter[kStalchildAdapterShadowScale] = 1750;
+    assert(IsValidStalchildAdapterState(kStalchildAdapterWordCount, stalchildAdapter.data()));
+    stalchildAdapter[kStalchildAdapterBehavior] = 7;
+    assert(!IsValidStalchildAdapterState(kStalchildAdapterWordCount, stalchildAdapter.data()));
+    stalchildAdapter[kStalchildAdapterBehavior] = 3;
+    stalchildAdapter[kStalchildAdapterShapeYOffset] = -8001;
+    assert(!IsValidStalchildAdapterState(kStalchildAdapterWordCount, stalchildAdapter.data()));
+    stalchildAdapter[kStalchildAdapterShapeYOffset] = 0;
+    stalchildAdapter[kStalchildAdapterShadowScale] = 2501;
+    assert(!IsValidStalchildAdapterState(kStalchildAdapterWordCount, stalchildAdapter.data()));
+
+    DynamicStalchildSnapshotLifecycle lifecycle;
+    size_t publishedAliveSnapshots = 0;
+    for (size_t frame = 0; frame < 600; ++frame) {
+        if (lifecycle.ShouldPublish(secondId, true)) {
+            ++publishedAliveSnapshots;
+        }
+    }
+    assert(publishedAliveSnapshots == 600);
+    assert(lifecycle.Size() == 1);
+
+    // Dawn/destruction has one durable terminal transition, regardless of duplicate engine lifecycle callbacks.
+    assert(lifecycle.ShouldPublish(secondId, false));
+    for (size_t callback = 0; callback < 32; ++callback) {
+        assert(!lifecycle.ShouldPublish(secondId, false));
+    }
+    lifecycle.Forget(secondId);
+    assert(lifecycle.Size() == 0);
+}
+
 int main() {
     TestRoundTrip();
     TestFragmentedPacket();
     TestClockAndAckMessages();
     TestPlayerSnapshot();
+    TestRemotePlayerRoomLifecycle();
     TestPlayerPresentation();
     TestCycleSnapshot();
     TestWorldStateMessages();
     TestActorSnapshot();
     TestCoordinationMessages();
     TestInvalidPacket();
+    TestDynamicStalchildLifecycle();
     std::cout << "HyruleCoop protocol tests passed\n";
     return 0;
 }

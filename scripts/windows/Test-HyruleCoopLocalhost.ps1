@@ -234,7 +234,14 @@ $requiredHostEvidence = @(
     'host\tgeneric-enemy-host-physical-collision\thit=1',
     'host\tgeneric-enemy-target-released\t',
     'host\tgeneric-enemy-dead-synchronized\t',
+    'host\tstalchild-host-target-agreed\thost selected the guest and disabled its own attack collider',
+    'host\tstalchild-host-remote-collider-suppressed\tguest sword damage is committed through its attack intent only',
+    'host\tstalchild-host-guest-hit-accepted\thit=1 health=1',
+    'host\tstalchild-host-guest-hit-accepted\thit=2 health=0',
+    'host\tstalchild-dead-synchronized\t',
+    'host\tstalchild-dawn-retired\thost population removed on both peers',
     'host\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags',
+    'host\ttemporary-scene-state-synchronized\ttemporary switch, collectible, and room clear replayed across peers',
     'host\tgohma-remote-movement-visible\t',
     'host\tgohma-remote-target-visible\t',
     'host\tgohma-remote-swing-visible\t',
@@ -260,7 +267,18 @@ $requiredClientEvidence = @(
     'client\tgeneric-enemy-host-swing-state-applied\t',
     'client\tgeneric-enemy-target-released\t',
     'client\tgeneric-enemy-dead-synchronized\t',
+    'client\tstalchild-client-target-agreed\tguest received the host-selected guest target before enemy contact',
+    'client\tstalchild-client-visual-emerged\thost emergence offset and shadow scale applied to the guest replica',
+    'client\tstalchild-client-authoritative-attack-applied\tsequence=',
+    'client\tstalchild-client-damaged-by-enemy\t',
+    'client\tstalchild-client-physical-collision\thit=1',
+    'client\tstalchild-client-first-sword-recovered\t',
+    'client\tstalchild-client-second-sword-state-entered\t',
+    'client\tstalchild-client-physical-collision\thit=2',
+    'client\tstalchild-dead-synchronized\t',
+    'client\tstalchild-dawn-retired\thost population removed on both peers',
     'client\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags',
+    'client\ttemporary-scene-state-synchronized\ttemporary switch, collectible, and room clear replayed across peers',
     'client\tgohma-local-movement-verified\t',
     'client\tgohma-target-acquired\t',
     'client\tgohma-sword-state-entered\t',
@@ -295,6 +313,66 @@ foreach ($pattern in $requiredClientEvidence) {
         throw "Hyrule Co-op localhost proof is missing client gameplay evidence: $pattern"
     }
 }
+
+function Assert-EvidenceOrder {
+    param(
+        [Parameter(Mandatory = $true)][string]$Text,
+        [Parameter(Mandatory = $true)][string[]]$Evidence,
+        [Parameter(Mandatory = $true)][string]$Label
+    )
+
+    $previousIndex = -1
+    foreach ($needle in $Evidence) {
+        $index = $Text.IndexOf($needle, $previousIndex + 1, [StringComparison]::Ordinal)
+        if ($index -lt 0) {
+            throw "$Label is missing ordered evidence: $needle"
+        }
+        if ($index -le $previousIndex) {
+            throw "$Label evidence occurred out of order: $needle"
+        }
+        $previousIndex = $index
+    }
+}
+
+$hostStalchildHits = [regex]::Matches(
+    $hostText,
+    '(?m)^\d+\thost\tstalchild-host-guest-hit-accepted\thit=([12]) health=([01])\r?$'
+)
+if ($hostStalchildHits.Count -ne 2 -or
+    $hostStalchildHits[0].Groups[1].Value -ne '1' -or $hostStalchildHits[0].Groups[2].Value -ne '1' -or
+    $hostStalchildHits[1].Groups[1].Value -ne '2' -or $hostStalchildHits[1].Groups[2].Value -ne '0') {
+    throw "Host Stalchild proof did not contain exactly two ordered, authoritative damage outcomes."
+}
+$clientStalchildHits = [regex]::Matches(
+    $clientText,
+    '(?m)^\d+\tclient\tstalchild-client-physical-collision\thit=([12])\r?$'
+)
+if ($clientStalchildHits.Count -ne 2 -or $clientStalchildHits[0].Groups[1].Value -ne '1' -or
+    $clientStalchildHits[1].Groups[1].Value -ne '2' -or
+    $clientText -match '(?m)^\d+\tclient\tstalchild-client-physical-collision\thit=3\r?$') {
+    throw "Guest Stalchild proof did not contain exactly one collider contact per scripted sword swing."
+}
+
+Assert-EvidenceOrder -Text $hostText -Label 'Host Stalchild authority proof' -Evidence @(
+    "`thost`tstalchild-host-target-agreed`t",
+    "`thost`tstalchild-host-guest-hit-accepted`thit=1 health=1",
+    "`thost`tstalchild-host-guest-hit-accepted`thit=2 health=0",
+    "`thost`tstalchild-dead-synchronized`t",
+    "`thost`tstalchild-dawn-retired`t"
+)
+Assert-EvidenceOrder -Text $clientText -Label 'Guest Stalchild incoming-attack proof' -Evidence @(
+    "`tclient`tstalchild-client-target-agreed`t",
+    "`tclient`tstalchild-client-authoritative-attack-applied`t",
+    "`tclient`tstalchild-client-damaged-by-enemy`t"
+)
+Assert-EvidenceOrder -Text $clientText -Label 'Guest Stalchild sword proof' -Evidence @(
+    "`tclient`tstalchild-client-physical-collision`thit=1",
+    "`tclient`tstalchild-client-first-sword-recovered`t",
+    "`tclient`tstalchild-client-second-sword-state-entered`t",
+    "`tclient`tstalchild-client-physical-collision`thit=2",
+    "`tclient`tstalchild-dead-synchronized`t",
+    "`tclient`tstalchild-dawn-retired`t"
+)
 
 $hostSave = Get-Content -LiteralPath (Join-Path $hostDir "Save\file1.sav") -Raw | ConvertFrom-Json
 $savedGuest = Get-Content -LiteralPath $guestSavePath -Raw | ConvertFrom-Json
@@ -342,7 +420,7 @@ Write-Host "Host-owned campaign persistence: PASS"
 Write-Host "Guest personal save protection: PASS"
 
 Write-Host "Hyrule Co-op two-instance deterministic gameplay proof: PASS"
-Write-Host "Combat coverage: specialized Deku Baba and Gohma adapters plus ordinary Keese bidirectional damage/death"
+Write-Host "Combat coverage: specialized Deku Baba, Stalchild, and Gohma adapters plus ordinary Keese bidirectional damage/death"
 Write-Host "Exact build fingerprint: $hostBuild"
 if ($RenderRole -ne "None") {
     Write-Host "Role-specific Player_Draw proof: $RenderRole"

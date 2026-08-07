@@ -152,7 +152,7 @@ SharedProgressionState CaptureSharedProgression(void* saveContextRef) {
     return state;
 }
 
-void ApplySharedProgression(void* saveContextRef, const SharedProgressionState& state) {
+void ApplySharedProgression(void* saveContextRef, const SharedProgressionState& state, bool applyLinkAge) {
     SaveContext* saveContext = static_cast<SaveContext*>(saveContextRef);
     if (saveContext == nullptr) {
         return;
@@ -180,7 +180,9 @@ void ApplySharedProgression(void* saveContextRef, const SharedProgressionState& 
     std::copy(state.dungeonKeys.begin(), state.dungeonKeys.end(),
               std::begin(saveContext->inventory.dungeonKeys));
     saveContext->healthCapacity = state.healthCapacity;
-    saveContext->linkAge = state.linkAge;
+    if (applyLinkAge) {
+        saveContext->linkAge = state.linkAge;
+    }
     saveContext->health = std::min(saveContext->health, saveContext->healthCapacity);
     const bool hadMagic = saveContext->isMagicAcquired != 0;
     const bool hadDoubleMagic = saveContext->isDoubleMagicAcquired != 0;

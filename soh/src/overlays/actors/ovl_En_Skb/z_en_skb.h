@@ -24,4 +24,8 @@ typedef struct EnSkb {
     /* 0x02C4 */ ColliderJntSphElement colliderItem[2];
 } EnSkb; // size = 0x0344
 
+void EnSkb_ApplyCoopState(EnSkb* stalchild, u8 actionState, u8 attackActive, f32 animationFrame,
+                          f32 animationSpeed, f32 shapeYOffset, f32 shadowScale);
+void EnSkb_RegisterCoopCollisions(EnSkb* stalchild, PlayState* play, u8 attackActive);
+
 #endif

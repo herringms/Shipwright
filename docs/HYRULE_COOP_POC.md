@@ -29,7 +29,8 @@ An engine-independent architectural test executes that entire sequence, includin
 ## Authority and ordering
 
 - Players own their movement and animation streams.
-- The host owns time, enemy and boss AI, enemy and boss health, durable scene flags, and progression commits.
+- The host owns time, enemy and boss AI, enemy and boss health, durable and live temporary scene flags, and progression
+  commits.
 - Guests send intents; they do not publish committed gameplay state.
 - Request identity is `(sessionEpoch, worldGeneration, participantId, requestId)`.
 - Scene flags, progression, and actors have independent revisions or keyed streams.
@@ -45,7 +46,9 @@ The save loaded by the host is the canonical campaign. Normal manual saves, auto
 host-authoritative scene flags and shared progression to the host's ordinary save slot. A guest may join from any
 compatible save; joining applies the host's age, durable progression, world state, and coordinated location in memory.
 The guest's complete pre-join save is retained, guest save writes are sanitized back to that snapshot, and disconnect
-restores it in memory. A guest therefore participates in the host campaign without merging or overwriting their own.
+restores it in memory. If the pre-join snapshot is unavailable, the write is suppressed instead of allowing host session
+state into the guest's personal save. A guest therefore participates in the host campaign without merging or
+overwriting their own.
 
 Shared progression includes durable inventory slots, child and adult trade items, bottle ownership, equipment,
 upgrades, quest items, dungeon items and keys, health capacity, magic ownership, double defense, Biggoron's Sword
@@ -94,16 +97,17 @@ the full architectural proof, entity identity, malformed peers, rejection delive
 Both game managers pass standalone syntax checks against their port headers.
 
 The OoT branch produces a complete MinGW Windows application. An environment-gated localhost harness boots two
-isolated save copies, connects them over TCP and UDP, coordinates two scene transitions, renders both Links, kills a
-host-owned Deku Baba from physical guest collisions, commits a durable collectible, shares guest-originated
-progression without sharing local resources, defeats host-owned Gohma from two physical guest attacks, and reconnects
-a deliberately stale guest. The same proof can deterministically inject recurring UDP loss, bounded data delay, and
+isolated save copies, connects them over TCP and UDP, coordinates scene transitions, renders both Links, kills a
+host-owned Deku Baba, Keese, and Stalchild from physical guest collisions, synchronizes temporary dungeon state,
+commits a durable collectible, shares guest-originated progression without sharing local resources, defeats host-owned
+Gohma from two physical guest attacks, and reconnects a deliberately stale guest. The same proof can deterministically
+inject recurring UDP loss, bounded data delay, and
 pair reordering. The commit gate repeats the full proof while dropping every fifth UDP data packet, delaying surviving
 packets by 25 ms, and reversing each surviving packet pair. Both instances verify canonical reconstruction and report
 `PASS`. The harness is dormant unless `HYRULE_COOP_TEST_ROLE` is explicitly set.
 
 Verified host and client executables must have identical generated fingerprints and negotiate the explicit
-`hyrule-coop-poc.3` compatibility ID with protocol version 5 in addition to Shipwright's upstream commit. Release
+`hyrule-coop-poc.3` compatibility ID with protocol version 9 in addition to Shipwright's upstream commit. Release
 tooling records the exact executable and package hashes for each published build.
 The PoC build pins its own OneDrive directory for offline availability instead of rejecting the path by name. No
 installed Ship of Harkinian or 2Ship files are modified by this branch.
@@ -115,7 +119,8 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
 - A generated compatibility fingerprint that rejects different locally built protocol/runtime revisions even when
   they share the same upstream Git commit
 - Authenticated pairing, encryption, NAT traversal, and invite services
-- Generic synchronization for every actor, puzzle, cutscene, and boss beyond Deku Baba and Gohma
+- Generic synchronization for every actor, puzzle, cutscene, and boss beyond the specialized Deku Baba, Stalchild,
+  and Gohma adapters plus the explicitly allowlisted Keese baseline
 - Carried world actors and their player attachments, including canonical shared pots and participant-local traversal
   Cuccos whose remote carry proxies do not replace either player's interactive Cucco
 - Complete Deku Baba hit reactions, temporary pruning, drops, and regrowth beyond the synthetic permanent-death proof

@@ -306,6 +306,7 @@ std::vector<uint8_t> EncodePlayerSnapshot(const PlayerSnapshotMessage& message) 
     writer.WriteU16(static_cast<uint16_t>(message.room));
     writer.WriteU32(static_cast<uint32_t>(message.entrance));
     writer.WriteU32(static_cast<uint32_t>(message.linkAge));
+    writer.WriteU16(static_cast<uint16_t>(message.sceneLayer));
     for (float value : message.position) {
         writer.WriteF32(value);
     }
@@ -366,6 +367,10 @@ std::optional<PlayerSnapshotMessage> DecodePlayerSnapshot(const std::vector<uint
         return std::nullopt;
     }
     message.linkAge = static_cast<int32_t>(signed32);
+    if (!reader.ReadU16(signed16)) {
+        return std::nullopt;
+    }
+    message.sceneLayer = static_cast<int16_t>(signed16);
     for (float& value : message.position) {
         if (!reader.ReadF32(value)) {
             return std::nullopt;
@@ -602,8 +607,11 @@ std::vector<uint8_t> EncodeSceneFlagsSnapshot(const SceneFlagsSnapshotMessage& m
     writer.WriteU16(static_cast<uint16_t>(message.scene));
     writer.WriteU32(message.chest);
     writer.WriteU32(message.switches);
+    writer.WriteU32(message.tempSwitches);
     writer.WriteU32(message.clear);
+    writer.WriteU32(message.tempClear);
     writer.WriteU32(message.collectible);
+    writer.WriteU32(message.tempCollectible);
     return writer.Data();
 }
 
@@ -613,8 +621,10 @@ std::optional<SceneFlagsSnapshotMessage> DecodeSceneFlagsSnapshot(const std::vec
     uint16_t scene = 0;
     if (!ReadScope(reader, message.scope) || !reader.ReadU64(message.revision) || !reader.ReadU16(scene) ||
         !reader.ReadU32(message.chest) ||
-        !reader.ReadU32(message.switches) || !reader.ReadU32(message.clear) ||
-        !reader.ReadU32(message.collectible) || !reader.AtEnd()) {
+        !reader.ReadU32(message.switches) || !reader.ReadU32(message.tempSwitches) ||
+        !reader.ReadU32(message.clear) ||
+        !reader.ReadU32(message.tempClear) || !reader.ReadU32(message.collectible) ||
+        !reader.ReadU32(message.tempCollectible) || !reader.AtEnd()) {
         return std::nullopt;
     }
     message.scene = static_cast<int16_t>(scene);
@@ -749,6 +759,12 @@ std::vector<uint8_t> EncodeBarrierSnapshot(const BarrierSnapshotMessage& message
     writer.WriteU16(static_cast<uint16_t>(state.targetScene));
     writer.WriteU16(static_cast<uint16_t>(state.targetRoom));
     writer.WriteU32(static_cast<uint32_t>(state.targetEntrance));
+    writer.WriteU32(static_cast<uint32_t>(state.targetLinkAge));
+    writer.WriteU16(static_cast<uint16_t>(state.targetSceneLayer));
+    writer.WriteU16(state.targetDayTime);
+    writer.WriteU16(state.targetSkyboxTime);
+    writer.WriteU16(state.targetTimeSpeed);
+    writer.WriteU8(state.targetNight);
     writer.WriteU64(state.deadlineTick);
     writer.WriteU8(static_cast<uint8_t>(std::min<size_t>(state.participants.size(), 64)));
     for (size_t index = 0; index < state.participants.size() && index < 64; ++index) {
@@ -778,13 +794,25 @@ std::optional<BarrierSnapshotMessage> DecodeBarrierSnapshot(const std::vector<ui
     message.state.kind = static_cast<BarrierKind>(kind);
     message.state.phase = static_cast<BarrierPhase>(phase);
     message.state.targetScene = static_cast<int16_t>(signedValue);
+    if (!reader.ReadU16(signedValue)) {
+        return std::nullopt;
+    }
+    const int16_t targetRoom = static_cast<int16_t>(signedValue);
     uint32_t targetEntrance = 0;
-    if (!reader.ReadU16(signedValue) || !reader.ReadU32(targetEntrance) ||
+    uint32_t targetLinkAge = 0;
+    if (!reader.ReadU32(targetEntrance) || !reader.ReadU32(targetLinkAge) || !reader.ReadU16(signedValue)) {
+        return std::nullopt;
+    }
+    message.state.targetRoom = targetRoom;
+    message.state.targetEntrance = static_cast<int32_t>(targetEntrance);
+    message.state.targetLinkAge = static_cast<int32_t>(targetLinkAge);
+    message.state.targetSceneLayer = static_cast<int16_t>(signedValue);
+    if (!reader.ReadU16(message.state.targetDayTime) || !reader.ReadU16(message.state.targetSkyboxTime) ||
+        !reader.ReadU16(message.state.targetTimeSpeed) || !reader.ReadU8(message.state.targetNight) ||
+        message.state.targetNight > 1 ||
         !reader.ReadU64(message.state.deadlineTick) || !reader.ReadU8(count) || count > 64) {
         return std::nullopt;
     }
-    message.state.targetRoom = static_cast<int16_t>(signedValue);
-    message.state.targetEntrance = static_cast<int32_t>(targetEntrance);
     message.state.participants.resize(count);
     for (uint64_t& participantId : message.state.participants) {
         if (!reader.ReadU64(participantId) || participantId == 0) {

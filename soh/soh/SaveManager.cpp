@@ -27,9 +27,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <optional>
-#include <unordered_set>
+#include <stdexcept>
 
 extern "C" SaveContext gSaveContext;
 using namespace std::string_literals;
@@ -91,57 +92,51 @@ std::string ComparablePath(const std::filesystem::path& path) {
 #endif
 }
 
+bool IsRegularFile(const std::filesystem::path& path) {
+    std::error_code error;
+    return std::filesystem::is_regular_file(path, error) && !error;
+}
+
+bool IsRecognizedShipwrightInstall(const std::filesystem::path& directory) {
+    return IsRegularFile(directory / "soh.exe") &&
+           (IsRegularFile(directory / "oot.o2r") || IsRegularFile(directory / "oot-mq.o2r") ||
+            IsRegularFile(directory / "Save" / "global.sav") ||
+            IsRegularFile(directory / "logs" / "Ship of Harkinian.log"));
+}
+
 std::optional<std::filesystem::path> FindLegacySaveDirectory(const std::filesystem::path& portableSaveDirectory,
                                                               const std::filesystem::path& appDataSaveDirectory) {
     if (ContainsSaveFiles(portableSaveDirectory)) {
         return portableSaveDirectory;
     }
 
-    std::vector<std::filesystem::path> roots;
-    roots.push_back(portableSaveDirectory.parent_path().parent_path());
-    if (const char* userProfile = std::getenv("USERPROFILE"); userProfile != nullptr && userProfile[0] != '\0') {
-        roots.emplace_back(std::filesystem::path(userProfile) / "Downloads");
-    }
-#ifdef _WIN32
-    const std::filesystem::path driveRoot = portableSaveDirectory.root_path();
-    if (!driveRoot.empty()) {
-        roots.emplace_back(driveRoot / "Games");
-        roots.emplace_back(driveRoot / "Emulators");
-    }
-#endif
-
-    std::unordered_set<std::string> visited;
     std::optional<std::filesystem::path> newest;
     auto newestWriteTime = std::filesystem::file_time_type::min();
     const std::string appDataKey = ComparablePath(appDataSaveDirectory);
+    const std::filesystem::path currentInstall = portableSaveDirectory.parent_path();
+    const std::filesystem::path installsParent = currentInstall.parent_path();
+    const std::string currentInstallKey = ComparablePath(currentInstall);
 
-    for (const auto& root : roots) {
-        std::error_code error;
-        if (!std::filesystem::is_directory(root, error) || error || !visited.insert(ComparablePath(root)).second) {
+    std::error_code error;
+    for (std::filesystem::directory_iterator iterator(installsParent,
+                                                       std::filesystem::directory_options::skip_permission_denied,
+                                                       error),
+         end;
+         !error && iterator != end; iterator.increment(error)) {
+        std::error_code entryError;
+        if (iterator->is_symlink(entryError) || entryError || !iterator->is_directory(entryError) || entryError) {
             continue;
         }
-        std::filesystem::recursive_directory_iterator iterator(
-            root, std::filesystem::directory_options::skip_permission_denied, error);
-        const std::filesystem::recursive_directory_iterator end;
-        while (!error && iterator != end) {
-            if (iterator.depth() > 3) {
-                iterator.disable_recursion_pending();
-            }
-            if (iterator->is_directory(error) && !error && Lowercase(iterator->path().filename().string()) == "save") {
-                const auto candidate = iterator->path();
-                iterator.disable_recursion_pending();
-                if (ComparablePath(candidate) != appDataKey &&
-                    std::filesystem::exists(candidate.parent_path() / "soh.exe", error) && !error &&
-                    ContainsSaveFiles(candidate)) {
-                    const auto writeTime = LatestSaveWriteTime(candidate);
-                    if (!newest.has_value() || writeTime > newestWriteTime) {
-                        newest = candidate;
-                        newestWriteTime = writeTime;
-                    }
-                }
-                error.clear();
-            }
-            iterator.increment(error);
+        const auto candidateInstall = iterator->path();
+        const auto candidateSave = candidateInstall / "Save";
+        if (ComparablePath(candidateInstall) == currentInstallKey || ComparablePath(candidateSave) == appDataKey ||
+            !IsRecognizedShipwrightInstall(candidateInstall) || !ContainsSaveFiles(candidateSave)) {
+            continue;
+        }
+        const auto writeTime = LatestSaveWriteTime(candidateSave);
+        if (!newest.has_value() || writeTime > newestWriteTime) {
+            newest = candidateSave;
+            newestWriteTime = writeTime;
         }
     }
     return newest;
@@ -666,30 +661,37 @@ void SaveManager::Init() {
         std::filesystem::rename(sOldSavePath, sOldBackupSavePath);
     }
 
-    // If the global save file exist, load it. Otherwise, create it.
+    // If the global save file exists, load it. A damaged or inaccessible preference file must not abort startup.
     if (std::filesystem::exists(sGlobalPath)) {
-        std::ifstream input(sGlobalPath);
+        try {
+            std::ifstream input(sGlobalPath);
+            if (!input.is_open()) {
+                throw std::runtime_error("could not open the file");
+            }
 
-        nlohmann::json globalBlock;
-        input >> globalBlock;
+            nlohmann::json globalBlock;
+            input >> globalBlock;
 
-        if (!globalBlock.contains("version")) {
-            SPDLOG_WARN("Global save does not contain a version. We are reconstructing it.");
+            if (!globalBlock.contains("version")) {
+                throw std::runtime_error("the file does not contain a version");
+            }
+
+            switch (globalBlock["version"].get<int>()) {
+                case 1:
+                    currentJsonContext = &globalBlock;
+                    LoadData("audioSetting", gSaveContext.audioSetting);
+                    LoadData("zTargetSetting", gSaveContext.zTargetSetting);
+                    LoadData("language", gSaveContext.language);
+                    break;
+                default:
+                    SPDLOG_WARN("Global save has an unrecognized version. We are reconstructing it.");
+                    CreateDefaultGlobal();
+                    break;
+            }
+        } catch (const std::exception& exception) {
+            SPDLOG_ERROR("Unable to load global save '{}': {}. Reconstructing defaults.", sGlobalPath.string(),
+                         exception.what());
             CreateDefaultGlobal();
-            return;
-        }
-
-        switch (globalBlock["version"].get<int>()) {
-            case 1:
-                currentJsonContext = &globalBlock;
-                LoadData("audioSetting", gSaveContext.audioSetting);
-                LoadData("zTargetSetting", gSaveContext.zTargetSetting);
-                LoadData("language", gSaveContext.language);
-                break;
-            default:
-                SPDLOG_WARN("Global save has a unrecognized version. We are reconstructing it.");
-                CreateDefaultGlobal();
-                break;
         }
     } else {
         CreateDefaultGlobal();
@@ -706,126 +708,142 @@ void SaveManager::Init() {
 }
 
 void SaveManager::StartupCheckAndInitMeta(int fileNum) {
-    saveMtx.lock();
     SPDLOG_INFO("Init Meta - fileNum: {}", fileNum);
     std::filesystem::path fileName = GetFileName(fileNum);
-
-    std::ifstream input(fileName);
-
     bool deleteRando = false;
     nlohmann::json metaSaveBlock = nlohmann::json::object();
-    input >> metaSaveBlock;
-    input.close();
-    saveMtx.unlock();
-    if (!metaSaveBlock.contains("version")) {
-        SPDLOG_ERROR("Save at " + fileName.string() + " contains no version");
-        assert(false);
+    try {
+        std::lock_guard<std::mutex> lock(saveMtx);
+        std::ifstream input(fileName);
+        if (!input.is_open()) {
+            throw std::runtime_error("could not open the file");
+        }
+        input >> metaSaveBlock;
+    } catch (const std::exception& exception) {
+        fileMetaInfo[fileNum].valid = false;
+        SPDLOG_ERROR("Unable to read save metadata from '{}': {}", fileName.string(), exception.what());
         return;
     }
-    if (metaSaveBlock["sections"].contains("randomizer")) {
-        if (!metaSaveBlock.contains("fileType") || metaSaveBlock["fileType"] == FILE_TYPE_SAVE_VANILLA) {
-            SohGui::RegisterPopup(
-                "Loading old file",
-                "The file in slot " + std::to_string(fileNum + 1) +
-                    " appears to contain randomizer data, but is a very old format or is empty.\n" +
-                    "The randomizer data has been removed, and this file will be treated as a vanilla "
-                    "file.\nIf this was a vanilla file, it still is, and you shouldn't see this "
-                    "message again.\n" +
-                    "If this was a randomizer file, the file will not work, and should be deleted.");
-            metaSaveBlock["sections"].erase(metaSaveBlock["sections"].find("randomizer"));
-            metaSaveBlock["fileType"] = FILE_TYPE_SAVE_VANILLA;
-            saveMtx.lock();
-            std::ofstream output(GetFileName(fileNum));
-            output << metaSaveBlock.dump(1);
-            output.close();
-            saveMtx.unlock();
-        }
-        s16 major = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMajor"];
-        s16 minor = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMinor"];
-        s16 patch = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionPatch"];
-        // block loading outdated rando save
-        if (!(major == gBuildVersionMajor && minor == gBuildVersionMinor && patch == gBuildVersionPatch)) {
-            std::string newFileName =
-                (GetSaveDirectory() /
-                 ("file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak"))
-                    .string();
-#if defined(__SWITCH__) || defined(__WIIU__)
-            copy_file(fileName.c_str(), newFileName.c_str());
-            std::filesystem::remove(fileName);
-#else
-            std::filesystem::rename(fileName, newFileName);
-#endif
-            SohGui::RegisterPopup("Outdated Randomizer Save",
-                                  "The SoH version in the file in slot " + std::to_string(fileNum + 1) +
-                                      " does not match the currently running version.\n" +
-                                      "Non-matching rando saves are unsupported, and the file has been renamed to\n" +
-                                      "    " + newFileName + "\n" +
-                                      "If this was not in error, the file should be deleted.");
+    try {
+        if (!metaSaveBlock.contains("version")) {
+            SPDLOG_ERROR("Save at " + fileName.string() + " contains no version");
+            fileMetaInfo[fileNum].valid = false;
             return;
         }
-    }
-    bool isRando = metaSaveBlock["fileType"] == FILE_TYPE_SAVE_RANDO;
-
-    fileMetaInfo[fileNum].valid = true;
-    nlohmann::json& baseBlock = metaSaveBlock["sections"]["base"]["data"];
-    fileMetaInfo[fileNum].deaths = baseBlock["deaths"];
-    for (int i = 0; i < ARRAY_COUNT(fileMetaInfo[fileNum].playerName); i++) {
-        fileMetaInfo[fileNum].playerName[i] = baseBlock["playerName"][i];
-    }
-    fileMetaInfo[fileNum].healthCapacity = baseBlock["healthCapacity"];
-    fileMetaInfo[fileNum].questItems = baseBlock["inventory"]["questItems"];
-    for (int i = 0; i < ARRAY_COUNT(fileMetaInfo[fileNum].inventoryItems); i++) {
-        fileMetaInfo[fileNum].inventoryItems[i] = baseBlock["inventory"]["items"][i];
-    }
-    fileMetaInfo[fileNum].equipment = baseBlock["inventory"]["equipment"];
-    fileMetaInfo[fileNum].upgrades = baseBlock["inventory"]["upgrades"];
-    fileMetaInfo[fileNum].isMagicAcquired = baseBlock["isMagicAcquired"];
-    fileMetaInfo[fileNum].isDoubleMagicAcquired = baseBlock["isDoubleMagicAcquired"];
-    fileMetaInfo[fileNum].rupees = baseBlock["rupees"];
-    fileMetaInfo[fileNum].gsTokens = baseBlock["inventory"]["gsTokens"];
-    fileMetaInfo[fileNum].isDoubleDefenseAcquired = baseBlock["isDoubleDefenseAcquired"];
-    fileMetaInfo[fileNum].gregFound = false;
-    fileMetaInfo[fileNum].filenameLanguage = baseBlock.value("filenameLanguage", 0);
-    fileMetaInfo[fileNum].hasWallet = !isRando;
-    fileMetaInfo[fileNum].triforcePieces = 0;
-    fileMetaInfo[fileNum].maxTriforcePieces = 0;
-    fileMetaInfo[fileNum].hasFishingRod = !isRando;
-    fileMetaInfo[fileNum].fishingPoleShuffled = false;
-    fileMetaInfo[fileNum].defense = baseBlock["inventory"]["defenseHearts"];
-    fileMetaInfo[fileNum].health = baseBlock["health"];
-
-    fileMetaInfo[fileNum].requiresOriginal = !baseBlock["isMasterQuest"];
-    fileMetaInfo[fileNum].requiresMasterQuest = baseBlock["isMasterQuest"];
-
-    fileMetaInfo[fileNum].randoSave = isRando;
-    if (isRando) {
-        nlohmann::json& randoBlock = metaSaveBlock["sections"]["randomizer"]["data"];
-
-        for (int i = 0; i < ARRAY_COUNT(fileMetaInfo[fileNum].seedHash); i++) {
-            fileMetaInfo[fileNum].seedHash[i] = randoBlock["seed"][i];
+        if (metaSaveBlock["sections"].contains("randomizer")) {
+            if (!metaSaveBlock.contains("fileType") || metaSaveBlock["fileType"] == FILE_TYPE_SAVE_VANILLA) {
+                SohGui::RegisterPopup(
+                    "Loading old file",
+                    "The file in slot " + std::to_string(fileNum + 1) +
+                        " appears to contain randomizer data, but is a very old format or is empty.\n" +
+                        "The randomizer data has been removed, and this file will be treated as a vanilla "
+                        "file.\nIf this was a vanilla file, it still is, and you shouldn't see this "
+                        "message again.\n" +
+                        "If this was a randomizer file, the file will not work, and should be deleted.");
+                metaSaveBlock["sections"].erase(metaSaveBlock["sections"].find("randomizer"));
+                metaSaveBlock["fileType"] = FILE_TYPE_SAVE_VANILLA;
+                std::lock_guard<std::mutex> lock(saveMtx);
+                std::ofstream output(GetFileName(fileNum));
+                if (!output.is_open()) {
+                    throw std::runtime_error("could not open the save for metadata migration");
+                }
+                output << metaSaveBlock.dump(1);
+            }
+            s16 major = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMajor"];
+            s16 minor = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMinor"];
+            s16 patch = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionPatch"];
+            // block loading outdated rando save
+            if (!(major == gBuildVersionMajor && minor == gBuildVersionMinor && patch == gBuildVersionPatch)) {
+                std::string newFileName =
+                    (GetSaveDirectory() /
+                     ("file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak"))
+                        .string();
+#if defined(__SWITCH__) || defined(__WIIU__)
+                copy_file(fileName.c_str(), newFileName.c_str());
+                std::filesystem::remove(fileName);
+#else
+                std::filesystem::rename(fileName, newFileName);
+#endif
+                SohGui::RegisterPopup("Outdated Randomizer Save",
+                                      "The SoH version in the file in slot " + std::to_string(fileNum + 1) +
+                                          " does not match the currently running version.\n" +
+                                          "Non-matching rando saves are unsupported, and the file has been renamed to\n" +
+                                          "    " + newFileName + "\n" +
+                                          "If this was not in error, the file should be deleted.");
+                return;
+            }
         }
-        fileMetaInfo[fileNum].gregFound =
-            (int16_t)baseBlock["randomizerInf"][RAND_INF_GREG_FOUND >> 4] & (1 << (RAND_INF_GREG_FOUND & 0xF));
-        fileMetaInfo[fileNum].hasWallet =
-            (int16_t)baseBlock["randomizerInf"][RAND_INF_HAS_WALLET >> 4] & (1 << (RAND_INF_HAS_WALLET & 0xF));
-        fileMetaInfo[fileNum].triforcePieces = randoBlock.value("triforcePiecesCollected", 0);
-        nlohmann::json& randoSettings = randoBlock["randoSettings"];
-        fileMetaInfo[fileNum].maxTriforcePieces = randoSettings[RSK_TRIFORCE_HUNT_PIECES_TOTAL].get<uint8_t>();
-        fileMetaInfo[fileNum].hasFishingRod = (int16_t)baseBlock["randomizerInf"][RAND_INF_FISHING_POLE_FOUND >> 4] &
-                                              (1 << (RAND_INF_FISHING_POLE_FOUND & 0xF));
-        fileMetaInfo[fileNum].fishingPoleShuffled = randoSettings[RSK_SHUFFLE_FISHING_POLE].get<uint8_t>() != 0;
-        fileMetaInfo[fileNum].requiresMasterQuest = randoBlock["masterQuestDungeonCount"] > 0;
-        // If the file is not marked as Master Quest, it could still theoretically be a rando save with all 12 MQ
-        // dungeons, in which case we don't actually require a vanilla OTR.
-        fileMetaInfo[fileNum].requiresOriginal = randoBlock["masterQuestDungeonCount"] < 12;
-    }
+        bool isRando = metaSaveBlock["fileType"] == FILE_TYPE_SAVE_RANDO;
 
-    fileMetaInfo[fileNum].buildVersionMajor = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMajor"];
-    fileMetaInfo[fileNum].buildVersionMinor = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMinor"];
-    fileMetaInfo[fileNum].buildVersionPatch = metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionPatch"];
-    SohUtils::CopyStringToCharArray(fileMetaInfo[fileNum].buildVersion,
-                                    metaSaveBlock["sections"]["sohStats"]["data"]["buildVersion"],
-                                    ARRAY_COUNT(fileMetaInfo[fileNum].buildVersion));
+        fileMetaInfo[fileNum].valid = true;
+        nlohmann::json& baseBlock = metaSaveBlock["sections"]["base"]["data"];
+        fileMetaInfo[fileNum].deaths = baseBlock["deaths"];
+        for (int i = 0; i < ARRAY_COUNT(fileMetaInfo[fileNum].playerName); i++) {
+            fileMetaInfo[fileNum].playerName[i] = baseBlock["playerName"][i];
+        }
+        fileMetaInfo[fileNum].healthCapacity = baseBlock["healthCapacity"];
+        fileMetaInfo[fileNum].questItems = baseBlock["inventory"]["questItems"];
+        for (int i = 0; i < ARRAY_COUNT(fileMetaInfo[fileNum].inventoryItems); i++) {
+            fileMetaInfo[fileNum].inventoryItems[i] = baseBlock["inventory"]["items"][i];
+        }
+        fileMetaInfo[fileNum].equipment = baseBlock["inventory"]["equipment"];
+        fileMetaInfo[fileNum].upgrades = baseBlock["inventory"]["upgrades"];
+        fileMetaInfo[fileNum].isMagicAcquired = baseBlock["isMagicAcquired"];
+        fileMetaInfo[fileNum].isDoubleMagicAcquired = baseBlock["isDoubleMagicAcquired"];
+        fileMetaInfo[fileNum].rupees = baseBlock["rupees"];
+        fileMetaInfo[fileNum].gsTokens = baseBlock["inventory"]["gsTokens"];
+        fileMetaInfo[fileNum].isDoubleDefenseAcquired = baseBlock["isDoubleDefenseAcquired"];
+        fileMetaInfo[fileNum].gregFound = false;
+        fileMetaInfo[fileNum].filenameLanguage = baseBlock.value("filenameLanguage", 0);
+        fileMetaInfo[fileNum].hasWallet = !isRando;
+        fileMetaInfo[fileNum].triforcePieces = 0;
+        fileMetaInfo[fileNum].maxTriforcePieces = 0;
+        fileMetaInfo[fileNum].hasFishingRod = !isRando;
+        fileMetaInfo[fileNum].fishingPoleShuffled = false;
+        fileMetaInfo[fileNum].defense = baseBlock["inventory"]["defenseHearts"];
+        fileMetaInfo[fileNum].health = baseBlock["health"];
+
+        fileMetaInfo[fileNum].requiresOriginal = !baseBlock["isMasterQuest"];
+        fileMetaInfo[fileNum].requiresMasterQuest = baseBlock["isMasterQuest"];
+
+        fileMetaInfo[fileNum].randoSave = isRando;
+        if (isRando) {
+            nlohmann::json& randoBlock = metaSaveBlock["sections"]["randomizer"]["data"];
+
+            for (int i = 0; i < ARRAY_COUNT(fileMetaInfo[fileNum].seedHash); i++) {
+                fileMetaInfo[fileNum].seedHash[i] = randoBlock["seed"][i];
+            }
+            fileMetaInfo[fileNum].gregFound =
+                (int16_t)baseBlock["randomizerInf"][RAND_INF_GREG_FOUND >> 4] & (1 << (RAND_INF_GREG_FOUND & 0xF));
+            fileMetaInfo[fileNum].hasWallet =
+                (int16_t)baseBlock["randomizerInf"][RAND_INF_HAS_WALLET >> 4] & (1 << (RAND_INF_HAS_WALLET & 0xF));
+            fileMetaInfo[fileNum].triforcePieces = randoBlock.value("triforcePiecesCollected", 0);
+            nlohmann::json& randoSettings = randoBlock["randoSettings"];
+            fileMetaInfo[fileNum].maxTriforcePieces = randoSettings[RSK_TRIFORCE_HUNT_PIECES_TOTAL].get<uint8_t>();
+            fileMetaInfo[fileNum].hasFishingRod =
+                (int16_t)baseBlock["randomizerInf"][RAND_INF_FISHING_POLE_FOUND >> 4] &
+                (1 << (RAND_INF_FISHING_POLE_FOUND & 0xF));
+            fileMetaInfo[fileNum].fishingPoleShuffled =
+                randoSettings[RSK_SHUFFLE_FISHING_POLE].get<uint8_t>() != 0;
+            fileMetaInfo[fileNum].requiresMasterQuest = randoBlock["masterQuestDungeonCount"] > 0;
+            // If the file is not marked as Master Quest, it could still theoretically be a rando save with all 12 MQ
+            // dungeons, in which case we don't actually require a vanilla OTR.
+            fileMetaInfo[fileNum].requiresOriginal = randoBlock["masterQuestDungeonCount"] < 12;
+        }
+
+        fileMetaInfo[fileNum].buildVersionMajor =
+            metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMajor"];
+        fileMetaInfo[fileNum].buildVersionMinor =
+            metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionMinor"];
+        fileMetaInfo[fileNum].buildVersionPatch =
+            metaSaveBlock["sections"]["sohStats"]["data"]["buildVersionPatch"];
+        SohUtils::CopyStringToCharArray(fileMetaInfo[fileNum].buildVersion,
+                                        metaSaveBlock["sections"]["sohStats"]["data"]["buildVersion"],
+                                        ARRAY_COUNT(fileMetaInfo[fileNum].buildVersion));
+    } catch (const std::exception& exception) {
+        fileMetaInfo[fileNum].valid = false;
+        SPDLOG_ERROR("Unable to initialize save metadata from '{}': {}", fileName.string(), exception.what());
+    }
 }
 
 void SaveManager::InitMeta(int fileNum) {
@@ -1378,7 +1396,8 @@ int copy_file(const char* src, const char* dst) {
 // Threaded SaveFile takes copy of gSaveContext for local unmodified storage
 
 void SaveManager::SaveFileThreaded(int fileNum, SaveContext* saveContext, int sectionID) {
-    saveMtx.lock();
+    std::unique_ptr<SaveContext> saveContextOwner(saveContext);
+    std::unique_lock<std::mutex> saveLock(saveMtx);
     SPDLOG_INFO("Save File - fileNum: {}", fileNum);
     // Needed for first time save, hasn't changed in forever anyway
     saveBlock["version"] = 1;
@@ -1423,8 +1442,13 @@ void SaveManager::SaveFileThreaded(int fileNum, SaveContext* saveContext, int se
     std::filesystem::path fileName = GetFileName(fileNum);
     std::filesystem::path tempFile = GetFileTempName(fileNum);
 
-    if (std::filesystem::exists(tempFile)) {
-        std::filesystem::remove(tempFile);
+    std::error_code fileError;
+    if (std::filesystem::exists(tempFile, fileError)) {
+        std::filesystem::remove(tempFile, fileError);
+    }
+    if (fileError) {
+        SPDLOG_ERROR("Save File failed before writing '{}': {}", tempFile.string(), fileError.message());
+        return;
     }
 
 #if defined(__SWITCH__) || defined(__WIIU__)
@@ -1434,8 +1458,16 @@ void SaveManager::SaveFileThreaded(int fileNum, SaveContext* saveContext, int se
     fclose(w);
 #else
     std::ofstream output(tempFile);
+    if (!output.is_open()) {
+        SPDLOG_ERROR("Save File could not open temporary file '{}'", tempFile.string());
+        return;
+    }
     output << std::setw(1) << saveBlock << std::endl;
     output.close();
+    if (!output) {
+        SPDLOG_ERROR("Save File could not finish writing temporary file '{}'", tempFile.string());
+        return;
+    }
 #endif
 
 #if defined(__SWITCH__) || defined(__WIIU__)
@@ -1447,14 +1479,18 @@ void SaveManager::SaveFileThreaded(int fileNum, SaveContext* saveContext, int se
         std::filesystem::remove(tempFile);
     }
 #else
-    std::filesystem::rename(tempFile, fileName);
+    std::filesystem::rename(tempFile, fileName, fileError);
+    if (fileError) {
+        SPDLOG_ERROR("Save File could not replace '{}': {}", fileName.string(), fileError.message());
+        std::error_code cleanupError;
+        std::filesystem::remove(tempFile, cleanupError);
+        return;
+    }
 #endif
 
-    delete saveContext;
     InitMeta(fileNum);
     GameInteractor::Instance->ExecuteHooks<GameInteractor::OnSaveFile>(fileNum, sectionID);
     SPDLOG_INFO("Save File Finish - fileNum: {}", fileNum);
-    saveMtx.unlock();
 }
 
 // SaveSection creates a copy of gSaveContext to prevent mid-save data modification, and passes its reference to
@@ -1472,7 +1508,11 @@ void SaveManager::SaveSection(int fileNum, int sectionID, bool threaded) {
     auto saveContext = new SaveContext;
     memcpy(saveContext, &gSaveContext, sizeof(gSaveContext));
     if (HyruleCoop::Manager::Instance != nullptr && HyruleCoop::Manager::Instance->IsActive()) {
-        HyruleCoop::Manager::Instance->SanitizeSaveCopy(saveContext);
+        if (!HyruleCoop::Manager::Instance->SanitizeSaveCopy(saveContext)) {
+            SPDLOG_ERROR("SaveSection: guest save suppressed because the pre-join save overlay is unavailable");
+            delete saveContext;
+            return;
+        }
     }
     if (threaded) {
         smThreadPool->detach_task(std::bind(&SaveManager::SaveFileThreaded, this, fileNum, saveContext, sectionID));
@@ -1500,11 +1540,16 @@ void SaveManager::SaveGlobal() {
 }
 
 void SaveManager::LoadFile(int fileNum) {
-    saveMtx.lock();
+    std::unique_lock<std::mutex> saveLock(saveMtx);
     SPDLOG_INFO("Load File - fileNum: {}", fileNum);
     std::filesystem::path fileName = GetFileName(fileNum);
-    assert(std::filesystem::exists(fileName));
     InitFile(false);
+    std::error_code fileError;
+    if (!std::filesystem::exists(fileName, fileError) || fileError) {
+        SPDLOG_ERROR("Load File could not access '{}': {}", fileName.string(),
+                     fileError ? fileError.message() : "the file does not exist");
+        return;
+    }
 
     std::ifstream input(fileName);
 
@@ -1560,8 +1605,9 @@ void SaveManager::LoadFile(int fileNum) {
         }
         InitMeta(fileNum);
         GameInteractor::Instance->ExecuteHooks<GameInteractor::OnLoadFile>(fileNum);
-    } catch ([[maybe_unused]] const std::exception& e) {
+    } catch (const std::exception& exception) {
         input.close();
+        SPDLOG_ERROR("Error loading save file '{}': {}", fileName.string(), exception.what());
         std::string newFileName =
             (GetSaveDirectory() /
              ("file" + std::to_string(fileNum + 1) + "-" + std::to_string(GetUnixTimestamp()) + ".bak"))
@@ -1570,14 +1616,17 @@ void SaveManager::LoadFile(int fileNum) {
         copy_file(fileName.c_str(), newFileName.c_str());
         std::filesystem::remove(fileName);
 #else
-        std::filesystem::rename(fileName, newFileName);
+        std::filesystem::rename(fileName, newFileName, fileError);
 #endif
-        SohGui::RegisterPopup("Error loading save file", "A problem occurred loading the save in slot " +
-                                                             std::to_string(fileNum + 1) +
-                                                             ".\nSave file corruption is suspected.\n" +
-                                                             "The file has been renamed to prevent further issues.");
+        if (fileError) {
+            SPDLOG_ERROR("Could not preserve the unreadable save as '{}': {}", newFileName, fileError.message());
+        } else {
+            SohGui::RegisterPopup("Error loading save file", "A problem occurred loading the save in slot " +
+                                                                 std::to_string(fileNum + 1) +
+                                                                 ".\nSave file corruption is suspected.\n" +
+                                                                 "The file has been renamed to prevent further issues.");
+        }
     }
-    saveMtx.unlock();
 }
 
 void SaveManager::ThreadPoolWait() {

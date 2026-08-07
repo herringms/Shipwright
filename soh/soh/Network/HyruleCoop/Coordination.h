@@ -124,6 +124,12 @@ struct BarrierState {
     int16_t targetScene = -1;
     int16_t targetRoom = -1;
     int32_t targetEntrance = -1;
+    int32_t targetLinkAge = -1;
+    int16_t targetSceneLayer = -1;
+    uint16_t targetDayTime = 0;
+    uint16_t targetSkyboxTime = 0;
+    uint16_t targetTimeSpeed = 0;
+    uint8_t targetNight = 0;
     uint64_t deadlineTick = 0;
     std::vector<uint64_t> participants;
     std::vector<uint64_t> readyParticipants;

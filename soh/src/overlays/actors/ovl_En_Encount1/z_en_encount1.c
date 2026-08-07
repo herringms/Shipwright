@@ -135,6 +135,8 @@ void EnEncount1_SpawnLeevers(EnEncount1* this, PlayState* play) {
 
                 floorY = BgCheck_EntityRaycastFloor4(&play->colCtx, &floorPoly, &bgId, &this->actor, &spawnPos);
                 if (floorY <= BGCHECK_Y_MIN) {
+                    // A transiently invalid floor must not retry the full spawn search every frame.
+                    this->timer = 30;
                     break;
                 }
                 spawnPos.y = floorY;
@@ -142,7 +144,7 @@ void EnEncount1_SpawnLeevers(EnEncount1* this, PlayState* play) {
                 leever = (EnReeba*)Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, ACTOR_EN_REEBA, spawnPos.x,
                                                       spawnPos.y, spawnPos.z, 0, 0, 0, spawnParams);
 
-                if (leever != NULL) {
+                if ((leever != NULL) && (leever->actor.update != NULL)) {
                     this->curNumSpawn++;
                     leever->aimType = this->leeverIndex++;
                     if (this->leeverIndex >= 5) {
@@ -163,6 +165,7 @@ void EnEncount1_SpawnLeevers(EnEncount1* this, PlayState* play) {
                         this->maxCurSpawns = (s16)Rand_ZeroFloat(2.99f) + 1;
                     }
                 } else {
+                    this->timer = 30;
                     // "Cannot spawn!"
                     osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
                     osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
@@ -248,10 +251,20 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
     // enemies because it's much more difficult tracking how many enemies specifically spawned by this spawner have
     // been spawned and/or killed.
     int8_t enemyCount = play->actorCtx.actorLists[ACTORCAT_ENEMY].length;
+    s16 spawnAttempts = 0;
     if ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
         (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15)) {
         while ((this->curNumSpawn < this->maxCurSpawns && this->totalNumSpawn < this->maxTotalSpawns) ||
                (CVarGetInteger(CVAR_ENHANCEMENT("RandomizedEnemies"), 0) && enemyCount < 15)) {
+            const s16 previousCurNumSpawn = this->curNumSpawn;
+            const int8_t previousEnemyCount = enemyCount;
+
+            // A behavior hook may replace the vanilla spawn. Keep this loop bounded even if that replacement fails
+            // or produces an actor outside the enemy category.
+            if (++spawnAttempts > 16) {
+                this->fieldSpawnTimer = 60;
+                break;
+            }
             if (play->sceneNum == SCENE_HYRULE_FIELD) {
                 if ((player->floorSfxOffset == 0) || (player->actor.floorBgId != BGCHECK_SCENE) ||
                     !(player->actor.bgCheckFlags & 1) || (player->stateFlags1 & PLAYER_STATE1_IN_WATER)) {
@@ -309,6 +322,11 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
 
             if (!GameInteractor_Should(VB_ENCOUNT1_SPAWN_STALCHILD_OR_WOLFOS, true, this, play, spawnId, spawnPos,
                                        spawnParams)) {
+                enemyCount = play->actorCtx.actorLists[ACTORCAT_ENEMY].length;
+                if (this->curNumSpawn <= previousCurNumSpawn && enemyCount <= previousEnemyCount) {
+                    this->fieldSpawnTimer = 60;
+                    break;
+                }
                 continue;
             }
 
@@ -328,6 +346,7 @@ void EnEncount1_SpawnStalchildOrWolfos(EnEncount1* this, PlayState* play) {
                 osSyncPrintf(VT_FGCOL(GREEN) "☆☆☆☆☆ 発生できません！ ☆☆☆☆☆\n" VT_RST);
                 break;
             }
+            enemyCount = play->actorCtx.actorLists[ACTORCAT_ENEMY].length;
         }
     }
 }

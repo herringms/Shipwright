@@ -1,6 +1,7 @@
 #include "RemotePlayer.h"
 
 #include "HyruleCoop.h"
+#include "RemotePlayerRoomPolicy.h"
 #include "soh/Enhancements/nametag.h"
 
 extern "C" {
@@ -44,13 +45,16 @@ extern "C" void HyruleCoopRemotePlayer_Init(Actor* actor, PlayState* play) {
     const u8 originalButtonItem = gSaveContext.equips.buttonItems[0];
     gSaveContext.linkAge = state->linkAge;
 
-    actor->room = -1;
     player->itemAction = player->heldItemAction = -1;
     player->heldItemId = ITEM_NONE;
     Player_UseItem(play, player, ITEM_NONE);
     Player_SetModelGroup(player, Player_ActionToModelGroup(player, player->heldItemAction));
     play->playerInit(player, play, gPlayerSkelHeaders[state->linkAge]);
     play->func_11D54(player, play);
+
+    // playerInit deliberately makes the local player roomless. A remote player must instead participate in normal
+    // room cleanup so every room load retires the previous remote actor.
+    actor->room = play->roomCtx.curRoom.num;
 
     // playerInit establishes local defaults. Reapply the replicated presentation before the first draw so a
     // reconnect cannot briefly render the guest without an equipped mask or weapon.
@@ -83,7 +87,26 @@ extern "C" void HyruleCoopRemotePlayer_Init(Actor* actor, PlayState* play) {
 
 extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
     const HyruleCoop::PlayerSnapshotMessage* state = nullptr;
-    if (!GetState(state) || gPlayState == nullptr || state->scene != gPlayState->sceneNum) {
+    if (!GetState(state) || gPlayState == nullptr) {
+        // Timeline mismatch is a hard visibility boundary, not just a draw rule. Retire the actor so Link's
+        // collider, targeting state, and update hooks cannot leak between child/adult or day/night worlds.
+        if (HyruleCoop::Manager::Instance != nullptr) {
+            HyruleCoop::Manager::Instance->NotifyRemotePlayerDestroyed(actor);
+        }
+        Actor_Kill(actor);
+        return;
+    }
+
+    const int16_t activeRoom = gPlayState->roomCtx.curRoom.num;
+    if (!HyruleCoop::IsRemotePlayerActorInActiveRoom(actor->room, activeRoom)) {
+        HyruleCoop::Manager::Instance->NotifyRemotePlayerDestroyed(actor);
+        Actor_Kill(actor);
+        return;
+    }
+    if (!HyruleCoop::IsRemotePlayerVisibleInRoom(
+            gPlayState->sceneNum, activeRoom, state->scene, state->room,
+            { gPlayState->linkAgeOnLoad, static_cast<int16_t>(gSaveContext.sceneLayer) },
+            { state->linkAge, state->sceneLayer })) {
         actor->shape.shadowAlpha = 0;
         actor->world.pos = { -9999.0f, -9999.0f, -9999.0f };
         return;
@@ -135,7 +158,12 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
 
 extern "C" void HyruleCoopRemotePlayer_Draw(Actor* actor, PlayState* play) {
     const HyruleCoop::PlayerSnapshotMessage* state = nullptr;
-    if (!GetState(state) || gPlayState == nullptr || state->scene != gPlayState->sceneNum) {
+    if (!GetState(state) || gPlayState == nullptr ||
+        !HyruleCoop::IsRemotePlayerVisibleInRoom(gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
+                                                  state->scene, state->room,
+                                                  { gPlayState->linkAgeOnLoad,
+                                                    static_cast<int16_t>(gSaveContext.sceneLayer) },
+                                                  { state->linkAge, state->sceneLayer })) {
         return;
     }
 

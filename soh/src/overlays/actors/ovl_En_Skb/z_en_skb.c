@@ -1,4 +1,5 @@
 #include "z_en_skb.h"
+#include "soh/Network/HyruleCoop/HyruleCoopC.h"
 #include "overlays/actors/ovl_En_Encount1/z_en_encount1.h"
 #include "objects/object_skb/object_skb.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
@@ -455,6 +456,9 @@ void func_80AFD968(EnSkb* this, PlayState* play) {
     } else if (this->actionState >= 3) {
         if ((this->collider.base.acFlags & 2) != 0) {
             this->collider.base.acFlags &= ~2;
+            if (!HyruleCoop_ShouldProcessStalchildHit(&this->actor, this->collider.base.ac)) {
+                return;
+            }
             if (this->actor.colChkInfo.damageEffect != 6) {
                 this->lastDamageReaction = this->actor.colChkInfo.damageEffect;
                 Actor_SetDropFlag(&this->actor, &this->collider.elements[1].info, 1);
@@ -510,7 +514,7 @@ void EnSkb_Update(Actor* thisx, PlayState* play) {
     this->actionFunc(this, play);
     this->actor.focus.pos = this->actor.world.pos;
     this->actor.focus.pos.y += (3000.0f * this->actor.scale.y);
-    if (this->setColliderAT != 0) {
+    if (HyruleCoop_ShouldRegisterStalchildAttack(&this->actor, this->setColliderAT != 0)) {
         CollisionCheck_SetAT(play, &play->colChkCtx, &this->collider.base);
     }
 
@@ -521,6 +525,50 @@ void EnSkb_Update(Actor* thisx, PlayState* play) {
         }
     }
     CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
+}
+
+void EnSkb_ApplyCoopState(EnSkb* stalchild, u8 actionState, u8 attackActive, f32 animationFrame,
+                          f32 animationSpeed, f32 shapeYOffset, f32 shadowScale) {
+    if (stalchild->actionState != actionState) {
+        switch (actionState) {
+            case 2:
+                func_80AFD644(stalchild);
+                break;
+            case 3:
+                func_80AFD33C(stalchild);
+                break;
+            case 4:
+                func_80AFD0A4(stalchild);
+                break;
+            case 5:
+                func_80AFD47C(stalchild);
+                break;
+            case 6:
+                EnSkb_SetupStunned(stalchild);
+                break;
+            default:
+                break;
+        }
+    }
+    stalchild->actionState = actionState;
+    stalchild->setColliderAT = attackActive;
+    stalchild->skelAnime.curFrame = animationFrame;
+    stalchild->skelAnime.playSpeed = animationSpeed;
+    stalchild->actor.shape.yOffset = shapeYOffset;
+    stalchild->actor.shape.shadowScale = shadowScale;
+}
+
+void EnSkb_RegisterCoopCollisions(EnSkb* stalchild, PlayState* play, u8 attackActive) {
+    stalchild->actor.focus.pos = stalchild->actor.world.pos;
+    stalchild->actor.focus.pos.y += 3000.0f * stalchild->actor.scale.y;
+    if (attackActive != 0) {
+        CollisionCheck_SetAT(play, &play->colChkCtx, &stalchild->collider.base);
+    }
+    if (stalchild->actionState >= 3 &&
+        ((stalchild->actor.colorFilterTimer == 0) || ((stalchild->actor.colorFilterParams & 0x4000) == 0))) {
+        CollisionCheck_SetAC(play, &play->colChkCtx, &stalchild->collider.base);
+    }
+    CollisionCheck_SetOC(play, &play->colChkCtx, &stalchild->collider.base);
 }
 
 s32 EnSkb_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {

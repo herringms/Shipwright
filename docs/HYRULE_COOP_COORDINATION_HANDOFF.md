@@ -200,6 +200,11 @@ contracts, and add each domain to the localhost proof before a remote build is p
 - Tillya's client froze at the frog log in the Zora area while the host remained responsive and its TCP connection on
   port `7777` remained established. A client dump and log are still needed before attributing this to the frog actor or
   scene logic.
+- The separate first-launch failure remains unclassified: its log shows a local save loading and fast completed writes,
+  then the process ends without a clean shutdown or crash record. That does not prove local save discovery and parsing
+  were healthy. Discovery is now restricted to non-link immediate sibling installations, malformed global/slot JSON is
+  handled without aborting startup, failed file replacement is reported without stranding the save mutex, and a guest
+  save is suppressed if its pre-join overlay was not captured.
 - That session used mismatched executables. The live host loaded the 3:02 PM build with SHA-256
   `84DFCFD38D4BA14B4B413DCC938E9E359AEFA329638500432C9FB9CB260EFD29`; Tillya's verified baseline contains the
   7:32 PM build with SHA-256 `9FFB6E6F5D4178EEC81DC9064932E4D95747496CB85F6E0B5C4E3D8D7E218C9B`.
@@ -212,6 +217,23 @@ contracts, and add each domain to the localhost proof before a remote build is p
   durable global event-check flags. Add host-owned world-event intents and snapshots with echo suppression. The first
   acceptance case must open the already-loaded waterfall for both players after either player performs the song, then
   remain open through scene changes and guest reconnect without replaying the song.
+- Jabu-Jabu's first-area switches use temporary scene-switch bits (`0x39` and `0x3C`), not durable saved flags. Protocol
+  version 9 now carries live `tempSwch`, `tempCollect`, and `tempClear` masks in the host-owned scene snapshot. Guest
+  changes are accepted only while the host occupies the same scene, replayed into the live `actorCtx`, and excluded
+  from durable scene flags and progression. The deterministic two-instance proof requires both peers to observe a
+  guest-originated temporary switch, temporary collectible, and temporary room-clear flag before advancing. This
+  generalizes beyond Jabu: temporary room-clear state drives dungeon shutters, timers, Ice Cavern mechanisms, Forest
+  Temple actors, blue warps, and room-clear switches.
+- Leever population is capped per spawn invocation, but the encounter intentionally repeats forever: small waves,
+  a giant after ten small deaths, a 600-frame cooldown, then more waves. Enemy Randomizer excludes standalone Leevers
+  because their lifecycle assumes a parent encounter spawner; that exclusion does not make multiplayer safe. Failed
+  floor/spawn attempts now enter a 30-frame backoff instead of retrying every frame, but Leevers still need a dedicated
+  host-owned spawner/actor adapter because each client currently chooses its own positions, wave counts, giant timing,
+  deaths, drops, and cooldowns.
+- Generic actor replication is now an explicit allowlist containing only Keese, the actor exercised by the complete
+  two-hit collision/damage/death proof. Applying common transform and health fields to unproven Jabu actors was unsafe
+  because their private action state is not represented by the generic snapshot. Unsupported enemies remain local-only
+  until they receive a dedicated adapter or pass the same proof.
 - Remote Links now preserve both peer names in the handshake and register Shipwright's existing world-space actor
   name-tag renderer when the remote Link spawns. The remaining location work is a minimap indicator using Anchor's
   compass-icon rendering rather than another HUD system. A marker should appear only in the same scene and, in

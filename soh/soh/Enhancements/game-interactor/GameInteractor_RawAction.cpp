@@ -165,6 +165,11 @@ void GameInteractor::RawAction::SetSceneFlag(int16_t sceneNum, int16_t flagType,
                 gSaveContext.sceneFlags[sceneNum].collect |= (1 << flag);
             }
             break;
+        case FlagType::FLAG_SCENE_TEMP_CLEAR:
+            if (sceneNum == gPlayState->sceneNum) {
+                gPlayState->actorCtx.flags.tempClear |= (1 << flag);
+            }
+            break;
     }
 };
 
@@ -204,6 +209,11 @@ void GameInteractor::RawAction::UnsetSceneFlag(int16_t sceneNum, int16_t flagTyp
             }
             if (flag != 0 && flag < 0x20) {
                 gSaveContext.sceneFlags[sceneNum].collect &= ~(1 << flag);
+            }
+            break;
+        case FlagType::FLAG_SCENE_TEMP_CLEAR:
+            if (sceneNum == gPlayState->sceneNum) {
+                gPlayState->actorCtx.flags.tempClear &= ~(1 << flag);
             }
             break;
     }

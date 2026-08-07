@@ -128,6 +128,24 @@ try {
     $discoveryMarker = Join-Path $discoveryAppData "HyruleCoop\save-storage-v1.txt"
     Remove-Item -LiteralPath $conflictingSave -Force
     Remove-Item -LiteralPath (Split-Path $versionBLog -Parent) -Recurse -Force -ErrorAction SilentlyContinue
+
+    # A newer-looking nested installation is intentionally out of scope. Discovery may inspect only immediate
+    # siblings of the current install, never descendants of another sibling.
+    $nestedDecoy = Join-Path $testRoot "Games\Archive\soh-old"
+    New-Item -ItemType Directory -Path (Join-Path $nestedDecoy "Save") -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $versionA "soh.exe") -Destination (Join-Path $nestedDecoy "soh.exe") -Force
+    $assetMarker = @("oot.o2r", "oot-mq.o2r") | ForEach-Object { Join-Path $versionA $_ } |
+        Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($null -ne $assetMarker) {
+        Copy-Item -LiteralPath $assetMarker -Destination (Join-Path $nestedDecoy (Split-Path $assetMarker -Leaf)) -Force
+    } else {
+        New-Item -ItemType Directory -Path (Join-Path $nestedDecoy "logs") -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $nestedDecoy "logs\Ship of Harkinian.log"), "recognized nested decoy")
+    }
+    $nestedSave = Join-Path $nestedDecoy "Save\file1.sav"
+    [IO.File]::WriteAllText($nestedSave, "nested save must not be discovered")
+    [IO.File]::SetLastWriteTimeUtc($nestedSave, [DateTime]::UtcNow.AddMinutes(5))
+
     $env:LOCALAPPDATA = $discoveryAppData
     Invoke-MigrationLaunch $versionB {
         (Test-Path -LiteralPath $discoveredSave) -and (Test-Path -LiteralPath $discoveryMarker) -and

@@ -2,6 +2,7 @@
 
 #include "DirectSession.h"
 #include "PlayerInterpolation.h"
+#include "StalchildPolicy.h"
 
 #include <atomic>
 #include <cstdint>
@@ -43,12 +44,14 @@ class Manager {
     TransportTelemetry GetTransportTelemetry() const;
     const PlayerSnapshotMessage* GetRemotePlayerSnapshot() const;
     const std::string& GetRemotePlayerName() const;
-    void SanitizeSaveCopy(void* saveContext) const;
+    bool SanitizeSaveCopy(void* saveContext) const;
     void PrepareRemotePlayer(void* actor);
     void NotifyRemotePlayerDestroyed(void* actor);
     void NotifyRemotePlayerPoseApplied(bool meleeActive);
     void NotifyRemotePlayerDrawApplied(bool meleeActive, uint8_t currentMask);
     void NotifyRemotePlayerMapPositionRead(int16_t scene);
+    bool ShouldRegisterStalchildAttack(void* actor, bool nativeAttackActive) const;
+    bool ShouldProcessStalchildHit(void* actor, void* attacker);
 
   private:
     void RegisterHooks(bool enabled);
@@ -91,6 +94,15 @@ class Manager {
     void SendDekuBabaSnapshot(void* actor, bool alive);
     void SendGohmaSnapshot(void* actor, bool alive);
     void SendGenericEnemySnapshot(void* actor, bool alive);
+    void ApplyStalchildSpawnerAuthority(void* actor, bool* shouldUpdate);
+    void HandleStalchildInitialized(void* actor);
+    void SendStalchildSnapshot(void* actor, bool alive);
+    void UpdateStalchild(void* actor);
+    void ApplyStalchildAuthority(void* actor, bool* shouldUpdate);
+    void ForgetStalchild(void* actor);
+    void ClearStalchildSceneState();
+    void ClearStalchildSessionState();
+    void EnsureRemoteStalchild(const ActorSnapshotMessage& message);
     void UpdateDekuBaba(void* actor);
     void ApplyDekuBabaAuthority(void* actor, bool* shouldUpdate);
     void ForgetDekuBaba(void* actor);
@@ -104,7 +116,12 @@ class Manager {
     void UpdateGenericGuestAttack();
     void InjectAutomatedTestInput(void* actor, bool* shouldUpdate);
     void RefreshRemotePlayer();
+    void ReclaimRemotePlayerActor();
     void DestroyRemotePlayer();
+    bool IsRemoteTimelineCompatible() const;
+    bool PrepareBarrierTimeline(const BarrierState& state);
+    bool IsBarrierTimelineReady(const BarrierState& state) const;
+    void PopulateBarrierTimeline(BarrierState& state) const;
     void BeginReconnectBarrier();
     void CompleteBarrierIfReady();
     void CaptureSaveOverlay();
@@ -114,6 +131,7 @@ class Manager {
     void ReportAutomatedTest(const std::string& event, const std::string& detail = "");
     void FailAutomatedTest(const std::string& reason);
     void WarpAutomatedTestToForest();
+    void BeginAutomatedStalchildBarrier();
     void BeginAutomatedBossBarrier();
     bool SpawnAutomatedTestDekuBaba();
     bool SpawnAutomatedTestKeese(const ActorSnapshotMessage& anchor);
@@ -181,6 +199,14 @@ class Manager {
     std::unordered_map<uint64_t, void*> localDekuBabas;
     std::unordered_map<uint64_t, void*> localGohmas;
     std::unordered_map<uint64_t, void*> localGenericEnemies;
+    std::unordered_map<uint64_t, void*> localStalchildren;
+    std::unordered_map<uint64_t, StalchildTarget> stalchildTargets;
+    std::unordered_map<uint64_t, uint16_t> stalchildAttackSequences;
+    std::unordered_map<uint64_t, uint16_t> appliedStalchildAttackSequences;
+    std::unordered_set<uint64_t> retiredStalchildren;
+    DynamicStalchildIdentityRegistry stalchildIdentityRegistry;
+    DynamicStalchildSnapshotLifecycle stalchildSnapshotLifecycle;
+    bool spawningReplicatedStalchild = false;
     std::unordered_map<uint64_t, ActorSnapshotMessage> actorSnapshots;
     std::unordered_set<uint64_t> genericGuestTargetsHitThisSwing;
 
@@ -206,13 +232,18 @@ class Manager {
     bool automatedTestRemoteMapPositionRead = false;
     bool automatedTestFirstDamageObserved = false;
     bool automatedTestPostDeathCleanupObserved = false;
+    bool automatedTestStalchildDawnTriggered = false;
+    bool automatedTestStalchildTargetAgreementObserved = false;
     bool automatedTestSaveRequested = false;
     std::atomic<bool> automatedTestSaveCompleted = false;
     uint8_t automatedTestCombatPhase = 0;
     uint32_t automatedTestCombatPhaseTick = 0;
     uint32_t automatedTestPhysicalHits = 0;
     uint32_t automatedTestAcceptedBossHits = 0;
+    uint32_t automatedTestRecoveryStartedTick = 0;
+    uint64_t automatedTestMissingTargetTick = 0;
     int16_t automatedTestLastObservedHealth = -1;
+    int16_t automatedTestNonTargetHealth = -1;
     int16_t automatedTestHostReconnectRupees = 0;
     int8_t automatedTestHostReconnectArrows = 0;
     int8_t automatedTestHostReconnectMagic = 0;
