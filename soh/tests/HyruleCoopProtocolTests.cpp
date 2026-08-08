@@ -312,6 +312,15 @@ static void TestActorSnapshot() {
     assert(decoded->adapterWordCount == 3);
     assert(decoded->adapterState[2] == -30000);
 
+    actor.adapterWordCount = static_cast<uint8_t>(kMaximumActorAdapterWords);
+    for (size_t index = 0; index < actor.adapterState.size(); ++index) {
+        actor.adapterState[index] = static_cast<int16_t>((index * 977) - 30000);
+    }
+    const auto decodedMaximumAdapter = DecodeActorSnapshot(EncodeActorSnapshot(actor));
+    assert(decodedMaximumAdapter.has_value());
+    assert(decodedMaximumAdapter->adapterWordCount == kMaximumActorAdapterWords);
+    assert(decodedMaximumAdapter->adapterState == actor.adapterState);
+
     std::vector<uint8_t> truncated = EncodeActorSnapshot(actor);
     truncated.pop_back();
     assert(!DecodeActorSnapshot(truncated).has_value());
@@ -327,6 +336,7 @@ static void TestCoordinationMessages() {
     state.targetScene = 17;
     state.targetRoom = 1;
     state.targetEntrance = 0x1234;
+    state.targetCutsceneIndex = 0xFFF1;
     state.targetLinkAge = 1;
     state.targetSceneLayer = 3;
     state.targetDayTime = 0x8000;
@@ -341,6 +351,7 @@ static void TestCoordinationMessages() {
     assert(barrier->state.operationEpoch == 20);
     assert(barrier->state.scope == state.scope);
     assert(barrier->state.targetEntrance == state.targetEntrance);
+    assert(barrier->state.targetCutsceneIndex == state.targetCutsceneIndex);
     assert(barrier->state.targetLinkAge == state.targetLinkAge);
     assert(barrier->state.targetSceneLayer == state.targetSceneLayer);
     assert(barrier->state.targetDayTime == state.targetDayTime);
@@ -354,11 +365,13 @@ static void TestCoordinationMessages() {
     assert(decodedReady.has_value());
     assert(decodedReady->participantId == 2);
 
-    AttackIntentMessage attack{ { 90, 4 }, 2, 88, 0x12345678, 300, 17, 1 };
+    AttackIntentMessage attack{ { 90, 4 }, 2, 88, 0x12345678, 300, 17, 1, 15, 2 };
     const auto decodedAttack = DecodeAttackIntent(EncodeAttackIntent(attack));
     assert(decodedAttack.has_value());
     assert(decodedAttack->requestId == 88);
     assert(decodedAttack->entityId == 0x12345678);
+    assert(decodedAttack->damageEffect == 15);
+    assert(decodedAttack->damage == 2);
 
     CollectibleIntentMessage collectible{ { 90, 4 }, 2, 89, 0x9988, 17, 3, 12 };
     const auto decodedCollectible = DecodeCollectibleIntent(EncodeCollectibleIntent(collectible));

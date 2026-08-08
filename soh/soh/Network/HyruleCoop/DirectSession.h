@@ -58,6 +58,12 @@ struct TransportTelemetry {
     uint64_t acknowledgedEventFallbacks = 0;
     uint64_t tcpBytesSent = 0;
     uint64_t tcpBytesReceived = 0;
+    uint64_t realtimeBytesSentPerSecond = 0;
+    uint64_t realtimeBytesReceivedPerSecond = 0;
+    uint64_t tcpBytesSentPerSecond = 0;
+    uint64_t tcpBytesReceivedPerSecond = 0;
+    uint64_t realtimeDatagramsSentPerSecond = 0;
+    uint64_t realtimeDatagramsReceivedPerSecond = 0;
 };
 
 class DirectSession {

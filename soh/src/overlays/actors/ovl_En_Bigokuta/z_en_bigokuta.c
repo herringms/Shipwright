@@ -1,6 +1,7 @@
 #include "z_en_bigokuta.h"
 #include "objects/object_bigokuta/object_bigokuta.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/JabuActorBridge.h"
 #include "soh/ResourceManagerHelpers.h"
 
 #define FLAGS                                                                                 \
@@ -29,6 +30,66 @@ void func_809BE26C(EnBigokuta* this, PlayState* play);
 void func_809BE180(EnBigokuta* this, PlayState* play);
 void func_809BE058(EnBigokuta* this, PlayState* play);
 void func_809BD1C8(EnBigokuta* this, PlayState* play);
+
+static uint8_t EnBigokuta_GetCoopAction(const EnBigokuta* this) {
+    if (this->actionFunc == func_809BD84C) return HYRULE_COOP_BIGOKUTA_PROP_WAIT;
+    if (this->actionFunc == func_809BD8DC) return HYRULE_COOP_BIGOKUTA_PROP_JUMP;
+    if (this->actionFunc == func_809BDAE8) return HYRULE_COOP_BIGOKUTA_PROP_TURN;
+    if (this->actionFunc == func_809BDB90) return HYRULE_COOP_BIGOKUTA_WAIT;
+    if (this->actionFunc == func_809BDF34) return HYRULE_COOP_BIGOKUTA_BOMB_STUN;
+    if (this->actionFunc == func_809BDC08) return HYRULE_COOP_BIGOKUTA_ORBIT;
+    if (this->actionFunc == func_809BE058) return HYRULE_COOP_BIGOKUTA_STUNNED;
+    if (this->actionFunc == func_809BE180) return HYRULE_COOP_BIGOKUTA_RECOIL;
+    if (this->actionFunc == func_809BE26C) return HYRULE_COOP_BIGOKUTA_DEATH;
+    if (this->actionFunc == func_809BE3E4) return HYRULE_COOP_BIGOKUTA_RECOVER;
+    if (this->actionFunc == func_809BE4A4) return HYRULE_COOP_BIGOKUTA_SINK;
+    if (this->actionFunc == func_809BE518) return HYRULE_COOP_BIGOKUTA_RISE;
+    return UINT8_MAX;
+}
+
+static int EnBigokuta_SetCoopAction(EnBigokuta* this, uint8_t action) {
+    switch (action) {
+        case HYRULE_COOP_BIGOKUTA_PROP_WAIT:
+            this->actionFunc = func_809BD84C;
+            break;
+        case HYRULE_COOP_BIGOKUTA_PROP_JUMP:
+            this->actionFunc = func_809BD8DC;
+            break;
+        case HYRULE_COOP_BIGOKUTA_PROP_TURN:
+            this->actionFunc = func_809BDAE8;
+            break;
+        case HYRULE_COOP_BIGOKUTA_WAIT:
+            this->actionFunc = func_809BDB90;
+            break;
+        case HYRULE_COOP_BIGOKUTA_BOMB_STUN:
+            this->actionFunc = func_809BDF34;
+            break;
+        case HYRULE_COOP_BIGOKUTA_ORBIT:
+            this->actionFunc = func_809BDC08;
+            break;
+        case HYRULE_COOP_BIGOKUTA_STUNNED:
+            this->actionFunc = func_809BE058;
+            break;
+        case HYRULE_COOP_BIGOKUTA_RECOIL:
+            this->actionFunc = func_809BE180;
+            break;
+        case HYRULE_COOP_BIGOKUTA_DEATH:
+            this->actionFunc = func_809BE26C;
+            break;
+        case HYRULE_COOP_BIGOKUTA_RECOVER:
+            this->actionFunc = func_809BE3E4;
+            break;
+        case HYRULE_COOP_BIGOKUTA_SINK:
+            this->actionFunc = func_809BE4A4;
+            break;
+        case HYRULE_COOP_BIGOKUTA_RISE:
+            this->actionFunc = func_809BE518;
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
 
 static Color_RGBA8 sEffectPrimColor = { 255, 255, 255, 255 };
 static Color_RGBA8 sEffectEnvColor = { 100, 255, 255, 255 };
@@ -334,13 +395,13 @@ void func_809BD4A4(EnBigokuta* this) {
     this->actionFunc = func_809BDFC8;
 }
 
-void func_809BD524(EnBigokuta* this) {
+static void EnBigokuta_SetupCoopStunned(EnBigokuta* this, int shortStun) {
     Animation_MorphToPlayOnce(&this->skelAnime, &object_bigokuta_Anim_000D1C, -5.0f);
     this->unk_196 = 80;
     this->unk_19A = 0;
     this->cylinder[0].base.atFlags |= AT_ON;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_DAIOCTA_MAHI);
-    if (this->collider.elements->info.acHitInfo->toucher.dmgFlags & 1) {
+    if (shortStun) {
         this->unk_195 = true;
         this->unk_196 = 20;
     } else {
@@ -349,6 +410,13 @@ void func_809BD524(EnBigokuta* this) {
     }
     Actor_SetColorFilter(&this->actor, 0, 255, 0, this->unk_196);
     this->actionFunc = func_809BE058;
+}
+
+void func_809BD524(EnBigokuta* this) {
+    int shortStun = this->collider.elements->info.acHitInfo != NULL &&
+                    (this->collider.elements->info.acHitInfo->toucher.dmgFlags & 1);
+
+    EnBigokuta_SetupCoopStunned(this, shortStun);
 }
 
 void func_809BD5E0(EnBigokuta* this) {
@@ -775,6 +843,31 @@ void EnBigokuta_UpdateDamage(EnBigokuta* this, PlayState* play) {
     }
 }
 
+static int EnBigokuta_ApplyDamage(EnBigokuta* this, PlayState* play, uint8_t damageEffect, uint8_t damage) {
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 ||
+        (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    if (damageEffect == 1) {
+        if (this->actionFunc != func_809BE058) {
+            EnBigokuta_SetupCoopStunned(this, 0);
+        }
+    } else if (damageEffect == 0xF) {
+        func_809BD47C(this);
+    } else {
+        if (Actor_ApplyDamage(&this->actor) == 0) {
+            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DAIOCTA_DEAD);
+            Enemy_StartFinishingBlow(play, &this->actor);
+        } else {
+            Audio_PlayActorSound2(&this->actor, NA_SE_EN_DAIOCTA_DAMAGE);
+        }
+        func_809BD5E0(this);
+    }
+    return 1;
+}
+
 void EnBigokuta_Update(Actor* thisx, PlayState* play2) {
     EnBigokuta* this = (EnBigokuta*)thisx;
     s32 i;
@@ -813,6 +906,81 @@ void EnBigokuta_Update(Actor* thisx, PlayState* play2) {
     }
     Actor_SetFocus(&this->actor, this->actor.scale.y * 25.0f * 100.0f);
     func_809BCEBC(this, play);
+}
+
+int HyruleCoop_EnBigokutaCaptureState(const void* actorRef, HyruleCoopJabuActorState* state) {
+    const EnBigokuta* this = actorRef;
+    uint8_t action;
+
+    if (this == NULL || state == NULL || this->actor.id != ACTOR_EN_BIGOKUTA) {
+        return 0;
+    }
+    action = EnBigokuta_GetCoopAction(this);
+    if (action == UINT8_MAX) {
+        return 0;
+    }
+    state->action = action;
+    state->health = this->actor.colChkInfo.health;
+    state->flags = this->unk_194 < 0;
+    state->variant = this->actor.params;
+    state->timer = this->unk_196;
+    state->auxTimer = this->unk_198;
+    state->auxState = this->unk_19A;
+    state->alpha = this->unk_195;
+    state->animationFrame = this->skelAnime.curFrame;
+    state->animationSpeed = this->skelAnime.playSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnBigokutaPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage) {
+    const EnBigokuta* this = actorRef;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || this->actor.id != ACTOR_EN_BIGOKUTA ||
+        !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnBigokutaApplyState(void* actorRef, void* playRef, const HyruleCoopJabuActorState* state) {
+    EnBigokuta* this = actorRef;
+
+    if (this == NULL || playRef == NULL || state == NULL || this->actor.id != ACTOR_EN_BIGOKUTA) {
+        return 0;
+    }
+    if ((EnBigokuta_GetCoopAction(this) != state->action) && !EnBigokuta_SetCoopAction(this, state->action)) {
+        return 0;
+    }
+    this->actor.colChkInfo.health = state->health;
+    this->actor.params = state->variant;
+    this->unk_194 = state->flags ? -1 : 1;
+    this->unk_195 = state->alpha != 0;
+    this->unk_196 = state->timer;
+    this->unk_198 = state->auxTimer;
+    this->unk_19A = state->auxState;
+    this->skelAnime.curFrame = state->animationFrame;
+    this->skelAnime.playSpeed = state->animationSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnBigokutaApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage) {
+    EnBigokuta* this = actorRef;
+
+    if (this == NULL || this->actor.id != ACTOR_EN_BIGOKUTA) {
+        return 0;
+    }
+    return EnBigokuta_ApplyDamage(this, playRef, damageEffect, damage);
+}
+
+int HyruleCoop_EnBigokutaApplyDeath(void* actorRef, void* playRef) {
+    EnBigokuta* this = actorRef;
+
+    if (this == NULL || this->actor.id != ACTOR_EN_BIGOKUTA) {
+        return 0;
+    }
+    return EnBigokuta_ApplyDamage(this, playRef, 0, MAX(1, this->actor.colChkInfo.health));
 }
 
 s32 EnBigokuta_OverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {

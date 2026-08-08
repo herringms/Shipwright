@@ -29,6 +29,9 @@ constexpr int16_t kStalchildMaximumShapeYOffset = 0;
 constexpr int16_t kStalchildMinimumShadowScale = 0;
 constexpr int16_t kStalchildMaximumShadowScale = 2500;
 constexpr float kStalchildShadowScalePrecision = 100.0f;
+// Ambient enemies do not need player-rate snapshots. Guest interpolation fills the frames between these updates,
+// while attacks, damage, death, and target changes still publish immediately as acknowledged transitions.
+constexpr uint32_t kStalchildSnapshotIntervalFrames = 4;
 
 enum class StalchildTarget : uint8_t {
     Host,

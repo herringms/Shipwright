@@ -759,6 +759,7 @@ std::vector<uint8_t> EncodeBarrierSnapshot(const BarrierSnapshotMessage& message
     writer.WriteU16(static_cast<uint16_t>(state.targetScene));
     writer.WriteU16(static_cast<uint16_t>(state.targetRoom));
     writer.WriteU32(static_cast<uint32_t>(state.targetEntrance));
+    writer.WriteU32(static_cast<uint32_t>(state.targetCutsceneIndex));
     writer.WriteU32(static_cast<uint32_t>(state.targetLinkAge));
     writer.WriteU16(static_cast<uint16_t>(state.targetSceneLayer));
     writer.WriteU16(state.targetDayTime);
@@ -785,7 +786,7 @@ std::optional<BarrierSnapshotMessage> DecodeBarrierSnapshot(const std::vector<ui
     uint16_t signedValue = 0;
     uint8_t count = 0;
     if (!reader.ReadU64(message.state.operationEpoch) || !ReadScope(reader, message.state.scope) ||
-        !reader.ReadU8(kind) || kind > static_cast<uint8_t>(BarrierKind::CycleTransition) ||
+        !reader.ReadU8(kind) || kind > static_cast<uint8_t>(BarrierKind::StoryEvent) ||
         !reader.ReadU8(phase) || phase > static_cast<uint8_t>(BarrierPhase::Aborted) ||
         !reader.ReadString(message.state.manifestHash) || message.state.manifestHash.size() > 128 ||
         !reader.ReadU16(signedValue)) {
@@ -799,12 +800,15 @@ std::optional<BarrierSnapshotMessage> DecodeBarrierSnapshot(const std::vector<ui
     }
     const int16_t targetRoom = static_cast<int16_t>(signedValue);
     uint32_t targetEntrance = 0;
+    uint32_t targetCutsceneIndex = 0;
     uint32_t targetLinkAge = 0;
-    if (!reader.ReadU32(targetEntrance) || !reader.ReadU32(targetLinkAge) || !reader.ReadU16(signedValue)) {
+    if (!reader.ReadU32(targetEntrance) || !reader.ReadU32(targetCutsceneIndex) ||
+        !reader.ReadU32(targetLinkAge) || !reader.ReadU16(signedValue)) {
         return std::nullopt;
     }
     message.state.targetRoom = targetRoom;
     message.state.targetEntrance = static_cast<int32_t>(targetEntrance);
+    message.state.targetCutsceneIndex = static_cast<int32_t>(targetCutsceneIndex);
     message.state.targetLinkAge = static_cast<int32_t>(targetLinkAge);
     message.state.targetSceneLayer = static_cast<int16_t>(signedValue);
     if (!reader.ReadU16(message.state.targetDayTime) || !reader.ReadU16(message.state.targetSkyboxTime) ||
@@ -866,6 +870,8 @@ std::vector<uint8_t> EncodeAttackIntent(const AttackIntentMessage& message) {
     writer.WriteU32(message.playerTick);
     writer.WriteU16(static_cast<uint16_t>(message.scene));
     writer.WriteU8(message.attackKind);
+    writer.WriteU8(message.damageEffect);
+    writer.WriteU8(message.damage);
     return writer.Data();
 }
 
@@ -876,7 +882,7 @@ std::optional<AttackIntentMessage> DecodeAttackIntent(const std::vector<uint8_t>
     if (!ReadScope(reader, message.scope) || !reader.ReadU64(message.participantId) ||
         !reader.ReadU64(message.requestId) || !reader.ReadU64(message.entityId) ||
         !reader.ReadU32(message.playerTick) || !reader.ReadU16(scene) || !reader.ReadU8(message.attackKind) ||
-        !reader.AtEnd()) {
+        !reader.ReadU8(message.damageEffect) || !reader.ReadU8(message.damage) || !reader.AtEnd()) {
         return std::nullopt;
     }
     message.scene = static_cast<int16_t>(scene);

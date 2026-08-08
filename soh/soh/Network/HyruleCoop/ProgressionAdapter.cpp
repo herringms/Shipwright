@@ -1,4 +1,5 @@
 #include "ProgressionAdapter.h"
+#include "DungeonRewardPolicy.h"
 
 extern "C" {
 #include "z64item.h"
@@ -79,6 +80,18 @@ void ReconcileDurableRewardInvariants(SaveContext* saveContext) {
     if (obtainedSilverScale && scaleLevel == 0) {
         saveContext->inventory.upgrades =
             (saveContext->inventory.upgrades & ~kScaleMask) | (1u << kScaleShift);
+    }
+
+    // A synchronized chest flag must never strand a peer without the fixed
+    // vanilla reward that made the chest disappear. Randomizer chests are
+    // intentionally excluded because their contents are not tied to flags.
+    if (saveContext->ship.quest.id == QUEST_NORMAL || saveContext->ship.quest.id == QUEST_MASTER) {
+        const bool masterQuest = saveContext->ship.quest.id == QUEST_MASTER;
+        for (size_t dungeonIndex = 0; dungeonIndex < kDungeonRewardDungeonCount; ++dungeonIndex) {
+            saveContext->inventory.dungeonItems[dungeonIndex] = ReconcileDungeonRewardFromChest(
+                saveContext->inventory.dungeonItems[dungeonIndex],
+                saveContext->sceneFlags[dungeonIndex].chest, dungeonIndex, masterQuest);
+        }
     }
 }
 
@@ -236,7 +249,13 @@ void ReconcileSharedProgressionDerivedFlags(void* saveContextRef) {
 }
 
 bool IsSharedProgressionItem(uint16_t itemId, uint16_t modIndex, uint8_t category) {
-    if (modIndex != MOD_NONE || itemId > ITEM_DOUBLE_DEFENSE) {
+    if (modIndex != MOD_NONE) {
+        return false;
+    }
+    if (itemId == ITEM_COMPASS || itemId == ITEM_DUNGEON_MAP) {
+        return true;
+    }
+    if (itemId > ITEM_DOUBLE_DEFENSE) {
         return false;
     }
     return category == ITEM_CATEGORY_MAJOR || category == ITEM_CATEGORY_BOSS_KEY ||

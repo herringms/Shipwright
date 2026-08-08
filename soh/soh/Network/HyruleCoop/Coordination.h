@@ -23,6 +23,8 @@ inline constexpr const char* OotCollectible = "oot.collectible.v1";
 inline constexpr const char* OotSharedProgression = "oot.sharedProgression.v1";
 inline constexpr const char* OotGohma = "oot.boss.gohma.v1";
 inline constexpr const char* OotEnemyBaseline = "oot.enemy.baseline.v1";
+inline constexpr const char* OotJabuActors = "oot.actor.jabu.v1";
+inline constexpr const char* OotStoryEvents = "oot.storyEvents.v1";
 inline constexpr const char* MmCycle = "mm.cycle.v1";
 } // namespace Capability
 
@@ -103,6 +105,7 @@ enum class BarrierKind : uint8_t {
     BossEncounter,
     ReconnectSnapshot,
     CycleTransition,
+    StoryEvent,
 };
 
 enum class BarrierPhase : uint8_t {
@@ -124,6 +127,7 @@ struct BarrierState {
     int16_t targetScene = -1;
     int16_t targetRoom = -1;
     int32_t targetEntrance = -1;
+    int32_t targetCutsceneIndex = -1;
     int32_t targetLinkAge = -1;
     int16_t targetSceneLayer = -1;
     uint16_t targetDayTime = 0;

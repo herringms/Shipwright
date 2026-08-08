@@ -19,6 +19,7 @@
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/savestate_serialize.h"
+#include "soh/Network/HyruleCoop/BarinadeBridge.h"
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -2906,6 +2907,337 @@ void BossVa_Update(Actor* thisx, PlayState* play2) {
         case BOSSVA_DOOR:
             break;
     }
+}
+
+static int BossVa_IsSupport(const BossVa* this) {
+    return this->actor.params >= BOSSVA_SUPPORT_1 && this->actor.params <= BOSSVA_SUPPORT_3;
+}
+
+static int BossVa_IsZapper(const BossVa* this) {
+    return this->actor.params >= BOSSVA_ZAPPER_1 && this->actor.params <= BOSSVA_ZAPPER_3;
+}
+
+static int BossVa_IsBari(const BossVa* this) {
+    return this->actor.params >= BOSSVA_BARI_UPPER_1 && this->actor.params <= BOSSVA_BARI_LOWER_5;
+}
+
+static uint8_t BossVa_GetCoopAction(const BossVa* this) {
+    if (this->actionFunc == BossVa_BodyIntro) return HYRULE_COOP_BARINADE_ACTION_BODY_INTRO;
+    if (this->actionFunc == BossVa_BodyPhase1) return HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_1;
+    if (this->actionFunc == BossVa_BodyPhase2) return HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_2;
+    if (this->actionFunc == BossVa_BodyPhase3) return HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_3;
+    if (this->actionFunc == BossVa_BodyPhase4) return HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_4;
+    if (this->actionFunc == BossVa_BodyDeath) return HYRULE_COOP_BARINADE_ACTION_BODY_DEATH;
+    if (this->actionFunc == BossVa_SupportIntro) return HYRULE_COOP_BARINADE_ACTION_SUPPORT_INTRO;
+    if (this->actionFunc == BossVa_SupportAttached) return HYRULE_COOP_BARINADE_ACTION_SUPPORT_ATTACHED;
+    if (this->actionFunc == BossVa_SupportCut) return HYRULE_COOP_BARINADE_ACTION_SUPPORT_CUT;
+    if (this->actionFunc == BossVa_ZapperIntro) return HYRULE_COOP_BARINADE_ACTION_ZAPPER_INTRO;
+    if (this->actionFunc == BossVa_ZapperAttack) return HYRULE_COOP_BARINADE_ACTION_ZAPPER_ATTACK;
+    if (this->actionFunc == BossVa_ZapperEnraged) return HYRULE_COOP_BARINADE_ACTION_ZAPPER_ENRAGED;
+    if (this->actionFunc == BossVa_ZapperDamaged) return HYRULE_COOP_BARINADE_ACTION_ZAPPER_DAMAGED;
+    if (this->actionFunc == BossVa_ZapperHold) return HYRULE_COOP_BARINADE_ACTION_ZAPPER_HOLD;
+    if (this->actionFunc == BossVa_ZapperDeath) return HYRULE_COOP_BARINADE_ACTION_ZAPPER_DEATH;
+    if (this->actionFunc == BossVa_Stump) return HYRULE_COOP_BARINADE_ACTION_STUMP;
+    if (this->actionFunc == BossVa_BariIntro) return HYRULE_COOP_BARINADE_ACTION_BARI_INTRO;
+    if (this->actionFunc == BossVa_BariPhase2Attack) return HYRULE_COOP_BARINADE_ACTION_BARI_PHASE_2;
+    if (this->actionFunc == BossVa_BariPhase3Attack) return HYRULE_COOP_BARINADE_ACTION_BARI_PHASE_3;
+    if (this->actionFunc == BossVa_BariPhase3Stunned) return HYRULE_COOP_BARINADE_ACTION_BARI_STUNNED;
+    if (this->actionFunc == BossVa_BariDeath) return HYRULE_COOP_BARINADE_ACTION_BARI_DEATH;
+    if (this->actionFunc == BossVa_Door) return HYRULE_COOP_BARINADE_ACTION_DOOR;
+    return UINT8_MAX;
+}
+
+static BossVaActionFunc BossVa_GetCoopActionFunc(const BossVa* this, uint8_t action) {
+    if (this->actor.params == BOSSVA_BODY) {
+        switch (action) {
+            case HYRULE_COOP_BARINADE_ACTION_BODY_INTRO: return BossVa_BodyIntro;
+            case HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_1: return BossVa_BodyPhase1;
+            case HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_2: return BossVa_BodyPhase2;
+            case HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_3: return BossVa_BodyPhase3;
+            case HYRULE_COOP_BARINADE_ACTION_BODY_PHASE_4: return BossVa_BodyPhase4;
+            case HYRULE_COOP_BARINADE_ACTION_BODY_DEATH: return BossVa_BodyDeath;
+        }
+    } else if (BossVa_IsSupport(this)) {
+        switch (action) {
+            case HYRULE_COOP_BARINADE_ACTION_SUPPORT_INTRO: return BossVa_SupportIntro;
+            case HYRULE_COOP_BARINADE_ACTION_SUPPORT_ATTACHED: return BossVa_SupportAttached;
+            case HYRULE_COOP_BARINADE_ACTION_SUPPORT_CUT: return BossVa_SupportCut;
+        }
+    } else if (BossVa_IsZapper(this)) {
+        switch (action) {
+            case HYRULE_COOP_BARINADE_ACTION_ZAPPER_INTRO: return BossVa_ZapperIntro;
+            case HYRULE_COOP_BARINADE_ACTION_ZAPPER_ATTACK: return BossVa_ZapperAttack;
+            case HYRULE_COOP_BARINADE_ACTION_ZAPPER_ENRAGED: return BossVa_ZapperEnraged;
+            case HYRULE_COOP_BARINADE_ACTION_ZAPPER_DAMAGED: return BossVa_ZapperDamaged;
+            case HYRULE_COOP_BARINADE_ACTION_ZAPPER_HOLD: return BossVa_ZapperHold;
+            case HYRULE_COOP_BARINADE_ACTION_ZAPPER_DEATH: return BossVa_ZapperDeath;
+        }
+    } else if (this->actor.params >= BOSSVA_STUMP_1 && this->actor.params <= BOSSVA_STUMP_3) {
+        if (action == HYRULE_COOP_BARINADE_ACTION_STUMP) return BossVa_Stump;
+    } else if (BossVa_IsBari(this)) {
+        switch (action) {
+            case HYRULE_COOP_BARINADE_ACTION_BARI_INTRO: return BossVa_BariIntro;
+            case HYRULE_COOP_BARINADE_ACTION_BARI_PHASE_2: return BossVa_BariPhase2Attack;
+            case HYRULE_COOP_BARINADE_ACTION_BARI_PHASE_3: return BossVa_BariPhase3Attack;
+            case HYRULE_COOP_BARINADE_ACTION_BARI_STUNNED: return BossVa_BariPhase3Stunned;
+            case HYRULE_COOP_BARINADE_ACTION_BARI_DEATH: return BossVa_BariDeath;
+        }
+    } else if (this->actor.params == BOSSVA_DOOR && action == HYRULE_COOP_BARINADE_ACTION_DOOR) {
+        return BossVa_Door;
+    }
+    return NULL;
+}
+
+static void BossVa_PrepareCoopAction(BossVa* this, PlayState* play, BossVaActionFunc action) {
+    /*
+     * The detached support uses a different skeleton. Recreate only that
+     * local visual resource; setup functions would also spawn a stump and
+     * change encounter-wide phase state, which a guest must never repeat.
+    */
+    if (action == BossVa_SupportCut && this->actionFunc != BossVa_SupportCut) {
+        SkelAnime_Free(&this->skelAnime, play);
+        SkelAnime_InitFlex(play, &this->skelAnime, &gBarinadeCutSupportSkel, &gBarinadeSupportCutAnim, NULL,
+                           NULL, 0);
+    }
+    BossVa_SetupAction(this, action);
+}
+
+void* HyruleCoop_BarinadeCanonicalActor(void* actorRef) {
+    BossVa* this = actorRef;
+
+    if (this == NULL || this->actor.id != ACTOR_BOSS_VA) {
+        return NULL;
+    }
+    if (this->actor.params == BOSSVA_BODY) {
+        return this;
+    }
+    if (this->actor.parent != NULL && this->actor.parent->id == ACTOR_BOSS_VA &&
+        this->actor.parent->params == BOSSVA_BODY) {
+        return this->actor.parent;
+    }
+    return this;
+}
+
+int HyruleCoop_BarinadeIsCanonicalRoot(const void* actorRef) {
+    const BossVa* this = actorRef;
+
+    return this != NULL && this->actor.id == ACTOR_BOSS_VA && this->actor.params == BOSSVA_BODY;
+}
+
+int HyruleCoop_BarinadeCaptureState(const void* actorRef, HyruleCoopBarinadeState* state) {
+    const BossVa* this = actorRef;
+    uint8_t action;
+
+    if (this == NULL || state == NULL || this->actor.id != ACTOR_BOSS_VA) {
+        return 0;
+    }
+    action = BossVa_GetCoopAction(this);
+    if (action == UINT8_MAX) {
+        return 0;
+    }
+
+    memset(state, 0, sizeof(*state));
+    state->component = this->actor.params;
+    state->phase = sFightPhase;
+    state->cutsceneState = sCsState;
+    state->doorState = sDoorState;
+    state->phase2Timer = sPhase2Timer;
+    state->phase4Health = sPhase4HP;
+    state->timer = this->timer;
+    state->timer2 = this->timer2;
+    state->visualRotation = this->unk_1AC;
+    state->actorFlags = this->actor.flags;
+    state->action = action;
+    state->health = this->actor.colChkInfo.health;
+    state->bodyState = sBodyState;
+    state->phase3StopMoving = sPhase3StopMoving;
+    state->onCeiling = this->onCeiling;
+    state->burst = this->burst;
+    state->isDead = this->isDead;
+    state->invincibilityTimer = this->invincibilityTimer;
+    state->bodyGlow = this->bodyGlow;
+    state->colorFilterTimer = this->actor.colorFilterTimer;
+    state->visualAngles[0] = this->unk_1B0;
+    state->visualAngles[1] = this->unk_1E4;
+    state->visualAngles[2] = this->unk_1E6;
+    state->visualAngles[3] = this->unk_1E8;
+    state->visualAngles[4] = this->unk_1EA;
+    state->visualAngles[5] = this->unk_1EC;
+    state->animationFrame = this->skelAnime.curFrame;
+    state->animationSpeed = this->skelAnime.playSpeed;
+    state->verticalOffset = this->actor.shape.yOffset;
+    state->visualScaleX = this->unk_1A0;
+    state->visualScaleY = this->unk_1A4;
+    state->visualScaleZ = this->unk_1A8;
+    return 1;
+}
+
+int HyruleCoop_BarinadeConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage) {
+    BossVa* this = actorRef;
+    Collider* collider = NULL;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || this->actor.id != ACTOR_BOSS_VA) {
+        return 0;
+    }
+    if (this->actor.params == BOSSVA_BODY) {
+        collider = &this->colliderBody.base;
+    } else if (BossVa_IsSupport(this) || BossVa_IsBari(this)) {
+        collider = &this->colliderSph.base;
+    } else {
+        return 0;
+    }
+    if (!(collider->acFlags & AC_HIT)) {
+        return 0;
+    }
+
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    if (collider->ac != NULL && collider->ac->id == ACTOR_EN_BOOM) {
+        *damageEffect = 1;
+    } else if (BossVa_IsSupport(this) || BossVa_IsBari(this)) {
+        // These components accept only the boomerang-compatible collider class.
+        *damageEffect = 1;
+    }
+    collider->acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_BarinadeApplyState(void* actorRef, void* playRef, const HyruleCoopBarinadeState* state) {
+    BossVa* this = actorRef;
+    PlayState* play = playRef;
+    BossVaActionFunc action;
+    const uint32_t replicatedFlags = ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_SFX_FOR_PLAYER_BODY_HIT;
+
+    if (this == NULL || play == NULL || state == NULL || this->actor.id != ACTOR_BOSS_VA ||
+        state->component != this->actor.params) {
+        return 0;
+    }
+    action = BossVa_GetCoopActionFunc(this, state->action);
+    if (action == NULL) {
+        return 0;
+    }
+
+    if (this->actor.params == BOSSVA_BODY) {
+        sFightPhase = (uint8_t)CLAMP(state->phase, 0, PHASE_DEATH);
+        sCsState = (s8)CLAMP(state->cutsceneState, INTRO_UNUSED_START, DEATH_FINISH);
+        sDoorState = CLAMP(state->doorState, 0, 100);
+        sPhase2Timer = state->phase2Timer;
+        sPhase4HP = (s8)CLAMP(state->phase4Health, 0, 127);
+        sBodyState = state->bodyState;
+        sPhase3StopMoving = state->phase3StopMoving != 0;
+    }
+
+    if (this->actionFunc != action) {
+        BossVa_PrepareCoopAction(this, play, action);
+    }
+    this->actor.flags = (this->actor.flags & ~replicatedFlags) | (state->actorFlags & replicatedFlags);
+    this->actor.colChkInfo.health = state->health;
+    this->timer = state->timer;
+    this->timer2 = state->timer2;
+    this->unk_1AC = state->visualRotation;
+    this->onCeiling = state->onCeiling;
+    this->burst = state->burst;
+    this->isDead = state->isDead;
+    this->invincibilityTimer = state->invincibilityTimer;
+    this->bodyGlow = state->bodyGlow;
+    this->actor.colorFilterTimer = state->colorFilterTimer;
+    this->unk_1B0 = state->visualAngles[0];
+    this->unk_1E4 = state->visualAngles[1];
+    this->unk_1E6 = state->visualAngles[2];
+    this->unk_1E8 = state->visualAngles[3];
+    this->unk_1EA = state->visualAngles[4];
+    this->unk_1EC = state->visualAngles[5];
+    this->skelAnime.curFrame = state->animationFrame;
+    this->skelAnime.playSpeed = state->animationSpeed;
+    this->actor.shape.yOffset = state->verticalOffset;
+    this->unk_1A0 = state->visualScaleX;
+    this->unk_1A4 = state->visualScaleY;
+    this->unk_1A8 = state->visualScaleZ;
+    return 1;
+}
+
+int HyruleCoop_BarinadeApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage) {
+    BossVa* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || play == NULL || this->actor.id != ACTOR_BOSS_VA) {
+        return 0;
+    }
+
+    if (this->actor.params == BOSSVA_BODY) {
+        if (this->actionFunc == BossVa_BodyPhase2) {
+            if (damageEffect == 1) {
+                sPhase2Timer &= 0xFE00;
+                Actor_SetColorFilter(&this->actor, 0, 255, 0, 160);
+            } else {
+                sKillBari++;
+                Actor_SetColorFilter(&this->actor, 0x4000, 255, 0, 12);
+            }
+            Audio_PlayActorSound2(&this->actor, NA_SE_EN_BALINADE_FAINT);
+            return 1;
+        }
+        if (this->actionFunc == BossVa_BodyPhase3 && damageEffect == 1) {
+            this->colliderBody.base.acFlags |= AC_HIT;
+            return 1;
+        }
+        if (this->actionFunc == BossVa_BodyPhase4 && this->timer >= 0 && this->invincibilityTimer == 0 &&
+            (damageEffect == 1 || damage != 0)) {
+            this->actor.colChkInfo.damageEffect = damageEffect;
+            this->actor.colChkInfo.damage = damage;
+            this->colliderBody.base.acFlags |= AC_HIT;
+            BossVa_BodyPhase4(this, play);
+            return 1;
+        }
+        return 0;
+    }
+
+    if (BossVa_IsSupport(this)) {
+        if (damageEffect != 1 || this->actionFunc == BossVa_SupportCut) {
+            return 0;
+        }
+        BossVa_SetupSupportCut(this, play);
+        return 1;
+    }
+
+    if (BossVa_IsBari(this)) {
+        if (damageEffect != 1 || this->actionFunc == BossVa_BariDeath || this->isDead) {
+            return 0;
+        }
+        BossVa_KillBari(this, play);
+        return 1;
+    }
+
+    /* Zappers and detached stumps are phase-driven; neither accepts direct damage. */
+    return 0;
+}
+
+int HyruleCoop_BarinadeApplyDeath(void* actorRef, void* playRef) {
+    BossVa* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || play == NULL || this->actor.id != ACTOR_BOSS_VA) {
+        return 0;
+    }
+    if (this->actor.params == BOSSVA_BODY) {
+        if (this->actionFunc == BossVa_BodyDeath) {
+            return 1;
+        }
+        if (this->actionFunc != BossVa_BodyPhase4) {
+            return 0;
+        }
+        sFightPhase = PHASE_DEATH - 1;
+        sPhase4HP = 1;
+        this->timer = 0;
+        this->invincibilityTimer = 0;
+        return HyruleCoop_BarinadeApplyDamage(this, play, 0, 1);
+    }
+    if (BossVa_IsSupport(this)) {
+        return HyruleCoop_BarinadeApplyDamage(this, play, 1, 0);
+    }
+    if (BossVa_IsBari(this)) {
+        return HyruleCoop_BarinadeApplyDamage(this, play, 1, 0);
+    }
+    return 0;
 }
 
 s32 BossVa_BodyOverrideLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3f* pos, Vec3s* rot, void* thisx) {

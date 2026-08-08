@@ -1,4 +1,5 @@
 #include "soh/Network/HyruleCoop/Coordination.h"
+#include "soh/Network/HyruleCoop/DungeonRewardPolicy.h"
 
 #include <cassert>
 #include <iostream>
@@ -101,11 +102,22 @@ static void TestBarrierCoordinator() {
     assert(coordinator.Abort());
 }
 
+static void TestDungeonRewardRepair() {
+    assert(ReconcileDungeonRewardFromChest(0, 1u << 0x02, 2, false) == kDungeonMapItemBit);
+    assert(ReconcileDungeonRewardFromChest(0, 1u << 0x04, 2, false) == kDungeonCompassItemBit);
+    assert(ReconcileDungeonRewardFromChest(kDungeonMapItemBit, 1u << 0x04, 2, false) ==
+           (kDungeonMapItemBit | kDungeonCompassItemBit));
+    assert(ReconcileDungeonRewardFromChest(0, 1u << 0x03, 2, true) == kDungeonMapItemBit);
+    assert(ReconcileDungeonRewardFromChest(0, 1u << 0x00, 2, true) == kDungeonCompassItemBit);
+    assert(ReconcileDungeonRewardFromChest(0x80, UINT32_MAX, kDungeonRewardDungeonCount, false) == 0x80);
+}
+
 int main() {
     TestCapabilities();
     TestRequestLedger();
     TestDomainRevisions();
     TestBarrierCoordinator();
+    TestDungeonRewardRepair();
     assert(GenerateNonce64() != 0);
     std::cout << "HyruleCoop coordination tests passed\n";
     return 0;

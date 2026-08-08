@@ -26,6 +26,8 @@ typedef struct EnSkb {
 
 void EnSkb_ApplyCoopState(EnSkb* stalchild, u8 actionState, u8 attackActive, f32 animationFrame,
                           f32 animationSpeed, f32 shapeYOffset, f32 shadowScale);
+u8 EnSkb_ApplyCoopDamage(EnSkb* stalchild, PlayState* play, u8 damage);
+void EnSkb_AdvanceCoopAnimation(EnSkb* stalchild);
 void EnSkb_RegisterCoopCollisions(EnSkb* stalchild, PlayState* play, u8 attackActive);
 
 #endif

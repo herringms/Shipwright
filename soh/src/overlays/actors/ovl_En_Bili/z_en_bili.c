@@ -7,6 +7,7 @@
 #include "z_en_bili.h"
 #include "objects/object_bl/object_bl.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/JabuActorBridge.h"
 #include "soh/ResourceManagerHelpers.h"
 
 #define FLAGS \
@@ -19,6 +20,15 @@ void EnBili_Draw(Actor* thisx, PlayState* play);
 
 void EnBili_SetupFloatIdle(EnBili* this);
 void EnBili_SetupSpawnedFlyApart(EnBili* this);
+void EnBili_SetupDischargeLightning(EnBili* this);
+void EnBili_SetupClimb(EnBili* this);
+void EnBili_SetupApproachPlayer(EnBili* this);
+void EnBili_SetupSetNewHomeHeight(EnBili* this);
+void EnBili_SetupRecoil(EnBili* this);
+void EnBili_SetupBurnt(EnBili* this);
+void EnBili_SetupDie(EnBili* this);
+void EnBili_SetupStunned(EnBili* this);
+void EnBili_SetupFrozen(EnBili* this, PlayState* play);
 void EnBili_FloatIdle(EnBili* this, PlayState* play);
 void EnBili_SpawnedFlyApart(EnBili* this, PlayState* play);
 void EnBili_DischargeLightning(EnBili* this, PlayState* play);
@@ -30,6 +40,68 @@ void EnBili_Burnt(EnBili* this, PlayState* play);
 void EnBili_Die(EnBili* this, PlayState* play);
 void EnBili_Stunned(EnBili* this, PlayState* play);
 void EnBili_Frozen(EnBili* this, PlayState* play);
+
+static int EnBili_SetCoopAction(EnBili* this, PlayState* play, uint8_t action) {
+    switch (action) {
+        case HYRULE_COOP_BILI_FLOAT_IDLE:
+            EnBili_SetupFloatIdle(this);
+            break;
+        case HYRULE_COOP_BILI_SPAWNED_FLY_APART:
+            EnBili_SetupSpawnedFlyApart(this);
+            break;
+        case HYRULE_COOP_BILI_DISCHARGE:
+            EnBili_SetupDischargeLightning(this);
+            break;
+        case HYRULE_COOP_BILI_CLIMB:
+            EnBili_SetupClimb(this);
+            break;
+        case HYRULE_COOP_BILI_APPROACH:
+            EnBili_SetupApproachPlayer(this);
+            break;
+        case HYRULE_COOP_BILI_SET_HOME_HEIGHT:
+            EnBili_SetupSetNewHomeHeight(this);
+            break;
+        case HYRULE_COOP_BILI_RECOIL:
+            /* Recoil normally reads the physical attacker. A remote snapshot has none. */
+            if (this->collider.base.ac != NULL) {
+                EnBili_SetupRecoil(this);
+            } else {
+                this->actionFunc = EnBili_Recoil;
+                this->actor.speedXZ = 5.0f;
+            }
+            break;
+        case HYRULE_COOP_BILI_BURNT:
+            EnBili_SetupBurnt(this);
+            break;
+        case HYRULE_COOP_BILI_DIE:
+            EnBili_SetupDie(this);
+            break;
+        case HYRULE_COOP_BILI_STUNNED:
+            EnBili_SetupStunned(this);
+            break;
+        case HYRULE_COOP_BILI_FROZEN:
+            EnBili_SetupFrozen(this, play);
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+static uint8_t EnBili_GetCoopAction(const EnBili* this) {
+    if (this->actionFunc == EnBili_FloatIdle) return HYRULE_COOP_BILI_FLOAT_IDLE;
+    if (this->actionFunc == EnBili_SpawnedFlyApart) return HYRULE_COOP_BILI_SPAWNED_FLY_APART;
+    if (this->actionFunc == EnBili_DischargeLightning) return HYRULE_COOP_BILI_DISCHARGE;
+    if (this->actionFunc == EnBili_Climb) return HYRULE_COOP_BILI_CLIMB;
+    if (this->actionFunc == EnBili_ApproachPlayer) return HYRULE_COOP_BILI_APPROACH;
+    if (this->actionFunc == EnBili_SetNewHomeHeight) return HYRULE_COOP_BILI_SET_HOME_HEIGHT;
+    if (this->actionFunc == EnBili_Recoil) return HYRULE_COOP_BILI_RECOIL;
+    if (this->actionFunc == EnBili_Burnt) return HYRULE_COOP_BILI_BURNT;
+    if (this->actionFunc == EnBili_Die) return HYRULE_COOP_BILI_DIE;
+    if (this->actionFunc == EnBili_Stunned) return HYRULE_COOP_BILI_STUNNED;
+    if (this->actionFunc == EnBili_Frozen) return HYRULE_COOP_BILI_FROZEN;
+    return UINT8_MAX;
+}
 
 const ActorInit En_Bili_InitVars = {
     ACTOR_EN_BILI,
@@ -551,52 +623,58 @@ void EnBili_Frozen(EnBili* this, PlayState* play) {
     }
 }
 
-void EnBili_UpdateDamage(EnBili* this, PlayState* play) {
-    u8 damageEffect;
+static int EnBili_ApplyDamage(EnBili* this, PlayState* play, uint8_t damageEffect, uint8_t damage) {
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 ||
+        (damageEffect == BIRI_DMGEFF_NONE && damage == 0)) {
+        return 0;
+    }
 
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    Actor_SetDropFlag(&this->actor, &this->collider.info, 1);
+
+    if (Actor_ApplyDamage(&this->actor) == 0) {
+        Audio_PlayActorSound2(&this->actor, NA_SE_EN_BIRI_DEAD);
+        Enemy_StartFinishingBlow(play, &this->actor);
+        this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
+    }
+
+    if (damageEffect == BIRI_DMGEFF_DEKUNUT) {
+        if (this->actionFunc != EnBili_Stunned) {
+            EnBili_SetupStunned(this);
+        }
+    } else if (damageEffect == BIRI_DMGEFF_SWORD) {
+        if (this->actionFunc != EnBili_Stunned) {
+            Actor_SetColorFilter(&this->actor, 0x4000, 0xC8, 0x2000, 0xA);
+
+            if (this->actor.colChkInfo.health == 0) {
+                this->actor.params = EN_BILI_TYPE_DYING;
+            }
+            EnBili_SetupDischargeLightning(this);
+        } else {
+            EnBili_SetupBurnt(this);
+        }
+    } else if (damageEffect == BIRI_DMGEFF_FIRE) {
+        EnBili_SetupBurnt(this);
+        this->timer = 2;
+    } else if (damageEffect == BIRI_DMGEFF_ICE) {
+        EnBili_SetupFrozen(this, play);
+    } else if (damageEffect == BIRI_DMGEFF_SLINGSHOT) {
+        EnBili_SetupRecoil(this);
+    } else {
+        EnBili_SetupBurnt(this);
+    }
+
+    if (this->collider.info.acHitInfo != NULL && (this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F820)) {
+        this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
+    }
+    return 1;
+}
+
+void EnBili_UpdateDamage(EnBili* this, PlayState* play) {
     if ((this->actor.colChkInfo.health != 0) && (this->collider.base.acFlags & AC_HIT)) {
         this->collider.base.acFlags &= ~AC_HIT;
-        Actor_SetDropFlag(&this->actor, &this->collider.info, 1);
-
-        if ((this->actor.colChkInfo.damageEffect != 0) || (this->actor.colChkInfo.damage != 0)) {
-            if (Actor_ApplyDamage(&this->actor) == 0) {
-                Audio_PlayActorSound2(&this->actor, NA_SE_EN_BIRI_DEAD);
-                Enemy_StartFinishingBlow(play, &this->actor);
-                this->actor.flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
-            }
-
-            damageEffect = this->actor.colChkInfo.damageEffect;
-
-            if (damageEffect == BIRI_DMGEFF_DEKUNUT) {
-                if (this->actionFunc != EnBili_Stunned) {
-                    EnBili_SetupStunned(this);
-                }
-            } else if (damageEffect == BIRI_DMGEFF_SWORD) {
-                if (this->actionFunc != EnBili_Stunned) {
-                    Actor_SetColorFilter(&this->actor, 0x4000, 0xC8, 0x2000, 0xA);
-
-                    if (this->actor.colChkInfo.health == 0) {
-                        this->actor.params = EN_BILI_TYPE_DYING;
-                    }
-                    EnBili_SetupDischargeLightning(this);
-                } else {
-                    EnBili_SetupBurnt(this);
-                }
-            } else if (damageEffect == BIRI_DMGEFF_FIRE) {
-                EnBili_SetupBurnt(this);
-                this->timer = 2;
-            } else if (damageEffect == BIRI_DMGEFF_ICE) {
-                EnBili_SetupFrozen(this, play);
-            } else if (damageEffect == BIRI_DMGEFF_SLINGSHOT) {
-                EnBili_SetupRecoil(this);
-            } else {
-                EnBili_SetupBurnt(this);
-            }
-
-            if (this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F820) { // DMG_ARROW
-                this->actor.flags |= ACTOR_FLAG_UPDATE_CULLING_DISABLED;
-            }
-        }
+        EnBili_ApplyDamage(this, play, this->actor.colChkInfo.damageEffect, this->actor.colChkInfo.damage);
     }
 }
 
@@ -644,6 +722,84 @@ void EnBili_Update(Actor* thisx, PlayState* play2) {
         CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
         Actor_SetFocus(&this->actor, 0.0f);
     }
+}
+
+int HyruleCoop_EnBiliCaptureState(const void* actorRef, HyruleCoopJabuActorState* state) {
+    const EnBili* this = actorRef;
+    uint8_t action;
+
+    if (this == NULL || state == NULL || this->actor.id != ACTOR_EN_BILI) {
+        return 0;
+    }
+    action = EnBili_GetCoopAction(this);
+    if (action == UINT8_MAX) {
+        return 0;
+    }
+    state->action = action;
+    state->health = this->actor.colChkInfo.health;
+    state->flags = this->tentaclesTexIndex;
+    state->variant = this->actor.params;
+    state->timer = this->timer;
+    state->auxTimer = this->actor.freezeTimer;
+    state->auxState = this->actor.colorFilterTimer;
+    state->alpha = this->actor.shape.shadowAlpha;
+    state->animationFrame = this->skelAnime.curFrame;
+    state->animationSpeed = this->skelAnime.playSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnBiliPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage) {
+    const EnBili* this = actorRef;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || this->actor.id != ACTOR_EN_BILI ||
+        !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    return *damageEffect != BIRI_DMGEFF_NONE || *damage != 0;
+}
+
+int HyruleCoop_EnBiliApplyState(void* actorRef, void* playRef, const HyruleCoopJabuActorState* state) {
+    EnBili* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || play == NULL || state == NULL || this->actor.id != ACTOR_EN_BILI) {
+        return 0;
+    }
+    this->actor.params = state->variant;
+    if ((EnBili_GetCoopAction(this) != state->action) && !EnBili_SetCoopAction(this, play, state->action)) {
+        return 0;
+    }
+    this->actor.colChkInfo.health = state->health;
+    this->tentaclesTexIndex = state->flags;
+    this->timer = state->timer;
+    this->actor.freezeTimer = state->auxTimer;
+    this->actor.colorFilterTimer = state->auxState;
+    this->actor.shape.shadowAlpha = state->alpha;
+    this->skelAnime.curFrame = state->animationFrame;
+    this->skelAnime.playSpeed = state->animationSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnBiliApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage) {
+    EnBili* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || this->actor.id != ACTOR_EN_BILI) {
+        return 0;
+    }
+    return EnBili_ApplyDamage(this, play, damageEffect, damage);
+}
+
+int HyruleCoop_EnBiliApplyDeath(void* actorRef, void* playRef) {
+    EnBili* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || play == NULL || this->actor.id != ACTOR_EN_BILI || this->actionFunc == EnBili_Die) {
+        return 0;
+    }
+    return EnBili_ApplyDamage(this, play, BIRI_DMGEFF_FIRE, MAX(1, this->actor.colChkInfo.health));
 }
 
 // Draw and associated functions

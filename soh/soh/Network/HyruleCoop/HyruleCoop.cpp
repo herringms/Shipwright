@@ -1,7 +1,10 @@
 #include "HyruleCoop.h"
+#include "BarinadeBridge.h"
 #include "DekuBabaAdapter.h"
+#include "DungeonRewardPolicy.h"
 #include "EntityIdentity.h"
 #include "GohmaAdapter.h"
+#include "JabuActorBridge.h"
 #include "ProgressionAdapter.h"
 #include "RemotePlayer.h"
 #include "RemotePlayerRoomPolicy.h"
@@ -65,6 +68,7 @@ enum AutomatedTestStage : uint8_t {
     TestGenericCombat,
     TestAwaitingCollection,
     TestAwaitingProgression,
+    TestAwaitingDungeonRewards,
     TestAwaitingWorldState,
     TestAwaitingStalchildScene,
     TestAwaitingStalchild,
@@ -80,6 +84,14 @@ enum AutomatedTestStage : uint8_t {
     TestComplete,
     TestFailed,
 };
+
+constexpr size_t kAutomatedTestJabuDungeonIndex = SCENE_JABU_JABU;
+static_assert(kAutomatedTestJabuDungeonIndex < kDungeonRewardDungeonCount);
+constexpr uint8_t kAutomatedTestJabuRewardMask = kDungeonMapItemBit | kDungeonCompassItemBit;
+constexpr uint32_t kAutomatedTestJabuMapChestMask =
+    1u << kVanillaDungeonRewardChests[kAutomatedTestJabuDungeonIndex].map;
+constexpr uint32_t kAutomatedTestJabuCompassChestMask =
+    1u << kVanillaDungeonRewardChests[kAutomatedTestJabuDungeonIndex].compass;
 
 enum AutomatedCombatPhase : uint8_t {
     CombatSetup,
@@ -107,6 +119,19 @@ constexpr uint32_t kGohmaRoomMask = 1u << kGohmaRoom;
 constexpr uint32_t kGuestAttackCooldownFrames = 6;
 constexpr int64_t kGuestAttackStateWindowFrames = 90;
 constexpr int16_t kGuestEnemyHealthSentinel = 127;
+constexpr uint8_t kJabuActorAdapterWordCount = 6;
+constexpr uint8_t kBarinadeAdapterWordCount =
+    static_cast<uint8_t>((sizeof(HyruleCoopBarinadeState) + sizeof(int16_t) - 1) / sizeof(int16_t));
+static_assert(kBarinadeAdapterWordCount <= kMaximumActorAdapterWords);
+
+enum JabuActorAdapterWord : uint8_t {
+    JabuActorFlags,
+    JabuActorVariant,
+    JabuActorTimer,
+    JabuActorAuxTimer,
+    JabuActorAuxState,
+    JabuActorAlpha,
+};
 constexpr const char* kHyruleCoopCompatibilityId = "hyrule-coop-poc.3";
 
 uint64_t HashFile(const std::filesystem::path& path, uint64_t hash) {
@@ -233,7 +258,8 @@ const CapabilityList& SupportedCapabilities() {
         { Capability::Coordination, Capability::RequestLedger, Capability::OotClock, Capability::OotPlayer,
           Capability::OotPlayerPresentation, Capability::OotSceneFlags, Capability::OotDekuBaba,
           Capability::OotGuestAttack, Capability::OotEnemyBaseline, Capability::OotCollectible,
-          Capability::OotSharedProgression, Capability::OotGohma })
+          Capability::OotSharedProgression, Capability::OotGohma, Capability::OotJabuActors,
+          Capability::OotStoryEvents })
                                                    .value();
     return capabilities;
 }
@@ -261,6 +287,11 @@ float HorizontalDistanceSquared(const float* first, const float* second) {
     return x * x + z * z;
 }
 
+int16_t InterpolateRotation(int16_t from, int16_t to, float amount) {
+    const int16_t delta = static_cast<int16_t>(to - from);
+    return static_cast<int16_t>(from + std::lround(static_cast<float>(delta) * amount));
+}
+
 void OverrideActorPlayerTracking(Actor* actor, const float* targetPosition) {
     if (actor == nullptr || targetPosition == nullptr) {
         return;
@@ -277,6 +308,212 @@ bool IsGenericEnemyAdapterActorId(int16_t actorId) {
     // Enemy-private action state is not interchangeable. Keep this baseline opt-in until each actor has passed the
     // physical-collision, damage, death, animation, and scene-transition proof used for Keese.
     return actorId == ACTOR_EN_FIREFLY;
+}
+
+ActorSnapshotMessage CaptureGenericEnemySnapshot(const Actor* actor, int16_t scene, uint32_t hostTick,
+                                                 SessionScope scope, bool alive);
+bool ApplyGenericEnemySnapshot(Actor* actor, const ActorSnapshotMessage& message);
+
+bool IsJabuActorId(int16_t actorId) {
+    return actorId == ACTOR_EN_BILI || actorId == ACTOR_EN_VALI || actorId == ACTOR_EN_TP || actorId == ACTOR_EN_BA ||
+           actorId == ACTOR_EN_BIGOKUTA;
+}
+
+Actor* CanonicalJabuActor(Actor* actor) {
+    if (actor == nullptr || !IsJabuActorId(actor->id)) {
+        return nullptr;
+    }
+    if (actor->id == ACTOR_EN_TP) {
+        return static_cast<Actor*>(HyruleCoop_EnTpCanonicalActor(actor));
+    }
+    if (actor->id == ACTOR_EN_BA) {
+        return static_cast<Actor*>(HyruleCoop_EnBaCanonicalActor(actor));
+    }
+    return actor;
+}
+
+uint64_t GetJabuActorEntityId(const Actor* actor, int16_t scene, uint32_t worldGeneration) {
+    StaticEntitySignature signature;
+    signature.worldGeneration = worldGeneration;
+    signature.scene = scene;
+    signature.room = actor->room;
+    signature.actorId = actor->id;
+    // Several Jabu actors mutate params during their death path. Their placement remains stable.
+    signature.params = 0;
+    signature.homePosition[0] = std::lround(actor->home.pos.x);
+    signature.homePosition[1] = std::lround(actor->home.pos.y);
+    signature.homePosition[2] = std::lround(actor->home.pos.z);
+    signature.homeRotation[0] = actor->home.rot.x;
+    signature.homeRotation[1] = actor->home.rot.y;
+    signature.homeRotation[2] = actor->home.rot.z;
+    return BuildStaticEntityId(signature);
+}
+
+bool CaptureJabuActorState(const Actor* actor, HyruleCoopJabuActorState* state) {
+    switch (actor->id) {
+        case ACTOR_EN_BILI:
+            return HyruleCoop_EnBiliCaptureState(actor, state) != 0;
+        case ACTOR_EN_VALI:
+            return HyruleCoop_EnValiCaptureState(actor, state) != 0;
+        case ACTOR_EN_TP:
+            return HyruleCoop_EnTpCaptureState(actor, state) != 0;
+        case ACTOR_EN_BA:
+            return HyruleCoop_EnBaCaptureState(actor, state) != 0;
+        case ACTOR_EN_BIGOKUTA:
+            return HyruleCoop_EnBigokutaCaptureState(actor, state) != 0;
+        default:
+            return false;
+    }
+}
+
+bool ApplyJabuActorState(Actor* actor, const HyruleCoopJabuActorState& state) {
+    switch (actor->id) {
+        case ACTOR_EN_BILI:
+            return HyruleCoop_EnBiliApplyState(actor, gPlayState, &state) != 0;
+        case ACTOR_EN_VALI:
+            return HyruleCoop_EnValiApplyState(actor, gPlayState, &state) != 0;
+        case ACTOR_EN_TP:
+            return HyruleCoop_EnTpApplyState(actor, gPlayState, &state) != 0;
+        case ACTOR_EN_BA:
+            return HyruleCoop_EnBaApplyState(actor, gPlayState, &state) != 0;
+        case ACTOR_EN_BIGOKUTA:
+            return HyruleCoop_EnBigokutaApplyState(actor, gPlayState, &state) != 0;
+        default:
+            return false;
+    }
+}
+
+bool ApplyJabuActorDamage(Actor* actor, uint8_t damageEffect, uint8_t damage) {
+    switch (actor->id) {
+        case ACTOR_EN_BILI:
+            return HyruleCoop_EnBiliApplyDamage(actor, gPlayState, damageEffect, damage) != 0;
+        case ACTOR_EN_VALI:
+            return HyruleCoop_EnValiApplyDamage(actor, gPlayState, damageEffect, damage) != 0;
+        case ACTOR_EN_TP:
+            return HyruleCoop_EnTpApplyDamage(actor, gPlayState, damageEffect, damage) != 0;
+        case ACTOR_EN_BA:
+            return HyruleCoop_EnBaApplyDamage(actor, gPlayState, damage) != 0;
+        case ACTOR_EN_BIGOKUTA:
+            return HyruleCoop_EnBigokutaApplyDamage(actor, gPlayState, damageEffect, damage) != 0;
+        default:
+            return false;
+    }
+}
+
+bool PeekJabuActorDamage(const Actor* actor, uint8_t* damageEffect, uint8_t* damage) {
+    switch (actor->id) {
+        case ACTOR_EN_BILI:
+            return HyruleCoop_EnBiliPeekDamage(actor, damageEffect, damage) != 0;
+        case ACTOR_EN_VALI:
+            return HyruleCoop_EnValiPeekDamage(actor, damageEffect, damage) != 0;
+        case ACTOR_EN_TP:
+            return HyruleCoop_EnTpPeekDamage(actor, damageEffect, damage) != 0;
+        case ACTOR_EN_BA:
+            return HyruleCoop_EnBaPeekDamage(actor, damageEffect, damage) != 0;
+        case ACTOR_EN_BIGOKUTA:
+            return HyruleCoop_EnBigokutaPeekDamage(actor, damageEffect, damage) != 0;
+        default:
+            return false;
+    }
+}
+
+ActorSnapshotMessage CaptureJabuActorSnapshot(const Actor* actor, int16_t scene, uint32_t hostTick,
+                                              SessionScope scope, bool alive) {
+    ActorSnapshotMessage message = CaptureGenericEnemySnapshot(actor, scene, hostTick, scope, alive);
+    message.entityId = GetJabuActorEntityId(actor, scene, scope.worldGeneration);
+    HyruleCoopJabuActorState state{};
+    if (!CaptureJabuActorState(actor, &state)) {
+        message.adapterWordCount = 0;
+        return message;
+    }
+    message.health = state.health;
+    message.stateId = state.action;
+    message.animationFrame = state.animationFrame;
+    message.animationSpeed = state.animationSpeed;
+    message.adapterWordCount = kJabuActorAdapterWordCount;
+    message.adapterState[JabuActorFlags] = state.flags;
+    message.adapterState[JabuActorVariant] = state.variant;
+    message.adapterState[JabuActorTimer] = state.timer;
+    message.adapterState[JabuActorAuxTimer] = state.auxTimer;
+    message.adapterState[JabuActorAuxState] = state.auxState;
+    message.adapterState[JabuActorAlpha] = state.alpha;
+    return message;
+}
+
+bool ApplyJabuActorSnapshot(Actor* actor, const ActorSnapshotMessage& message) {
+    if (actor == nullptr || actor->id != message.actorId || message.adapterWordCount != kJabuActorAdapterWordCount ||
+        message.stateId > UINT8_MAX) {
+        return false;
+    }
+    ActorSnapshotMessage common = message;
+    common.params = actor->params;
+    common.adapterWordCount = 0;
+    common.adapterState = {};
+    if (!ApplyGenericEnemySnapshot(actor, common)) {
+        return false;
+    }
+    HyruleCoopJabuActorState state{};
+    state.action = static_cast<uint8_t>(message.stateId);
+    state.health = static_cast<uint8_t>(std::clamp<int16_t>(message.health, 0, UINT8_MAX));
+    state.flags = static_cast<uint8_t>(message.adapterState[JabuActorFlags]);
+    state.variant = message.adapterState[JabuActorVariant];
+    state.timer = message.adapterState[JabuActorTimer];
+    state.auxTimer = message.adapterState[JabuActorAuxTimer];
+    state.auxState = message.adapterState[JabuActorAuxState];
+    state.alpha = message.adapterState[JabuActorAlpha];
+    state.animationFrame = message.animationFrame;
+    state.animationSpeed = message.animationSpeed;
+    return ApplyJabuActorState(actor, state);
+}
+
+uint64_t GetBarinadeEntityId(const Actor* actor, int16_t scene, uint32_t worldGeneration) {
+    StaticEntitySignature signature;
+    signature.worldGeneration = worldGeneration;
+    signature.scene = scene;
+    signature.room = actor->room;
+    signature.actorId = actor->id;
+    signature.params = actor->params;
+    signature.homePosition[0] = std::lround(actor->home.pos.x);
+    signature.homePosition[1] = std::lround(actor->home.pos.y);
+    signature.homePosition[2] = std::lround(actor->home.pos.z);
+    signature.homeRotation[0] = actor->home.rot.x;
+    signature.homeRotation[1] = actor->home.rot.y;
+    signature.homeRotation[2] = actor->home.rot.z;
+    return BuildStaticEntityId(signature);
+}
+
+ActorSnapshotMessage CaptureBarinadeSnapshot(const Actor* actor, int16_t scene, uint32_t hostTick,
+                                             SessionScope scope, bool alive) {
+    ActorSnapshotMessage message = CaptureGenericEnemySnapshot(actor, scene, hostTick, scope, alive);
+    message.entityId = GetBarinadeEntityId(actor, scene, scope.worldGeneration);
+    HyruleCoopBarinadeState state{};
+    if (!HyruleCoop_BarinadeCaptureState(actor, &state)) {
+        message.adapterWordCount = 0;
+        return message;
+    }
+    message.health = state.health;
+    message.stateId = state.action;
+    message.animationFrame = state.animationFrame;
+    message.animationSpeed = state.animationSpeed;
+    message.adapterWordCount = kBarinadeAdapterWordCount;
+    std::memcpy(message.adapterState.data(), &state, sizeof(state));
+    return message;
+}
+
+bool ApplyBarinadeSnapshot(Actor* actor, const ActorSnapshotMessage& message) {
+    if (actor == nullptr || actor->id != ACTOR_BOSS_VA || message.actorId != ACTOR_BOSS_VA ||
+        actor->params != message.params || message.adapterWordCount != kBarinadeAdapterWordCount) {
+        return false;
+    }
+    ActorSnapshotMessage common = message;
+    common.adapterWordCount = 0;
+    common.adapterState = {};
+    if (!ApplyGenericEnemySnapshot(actor, common)) {
+        return false;
+    }
+    HyruleCoopBarinadeState state{};
+    std::memcpy(&state, message.adapterState.data(), sizeof(state));
+    return HyruleCoop_BarinadeApplyState(actor, gPlayState, &state) != 0;
 }
 
 bool IsGenericEnemyActor(const Actor* actor) {
@@ -352,7 +589,7 @@ bool ApplyGenericEnemySnapshot(Actor* actor, const ActorSnapshotMessage& message
     return true;
 }
 
-bool ApplyStalchildSnapshot(Actor* actor, const ActorSnapshotMessage& message) {
+bool ApplyStalchildSnapshot(Actor* actor, const ActorSnapshotMessage& message, bool snapTransform) {
     if (actor == nullptr || actor->id != ACTOR_EN_SKB ||
         !IsValidStalchildAdapterState(message.adapterWordCount, message.adapterState.data()) ||
         DecodeStalchildTarget(message.stateId) !=
@@ -360,6 +597,9 @@ bool ApplyStalchildSnapshot(Actor* actor, const ActorSnapshotMessage& message) {
         return false;
     }
 
+    const Vec3f previousPosition = actor->world.pos;
+    const Vec3s previousWorldRotation = actor->world.rot;
+    const Vec3s previousShapeRotation = actor->shape.rot;
     ActorSnapshotMessage common = message;
     common.adapterWordCount = 0;
     common.adapterState = {};
@@ -374,6 +614,27 @@ bool ApplyStalchildSnapshot(Actor* actor, const ActorSnapshotMessage& message) {
                          static_cast<float>(message.adapterState[kStalchildAdapterShapeYOffset]),
                          static_cast<float>(message.adapterState[kStalchildAdapterShadowScale]) /
                              kStalchildShadowScalePrecision);
+
+    const float targetPosition[3] = { message.position[0], message.position[1], message.position[2] };
+    const float priorPosition[3] = { previousPosition.x, previousPosition.y, previousPosition.z };
+    if (!snapTransform && DistanceSquared(targetPosition, priorPosition) <= SQ(600.0f)) {
+        constexpr float kReplicaBlend = 0.45f;
+        actor->world.pos.x = previousPosition.x + (message.position[0] - previousPosition.x) * kReplicaBlend;
+        actor->world.pos.y = previousPosition.y + (message.position[1] - previousPosition.y) * kReplicaBlend;
+        actor->world.pos.z = previousPosition.z + (message.position[2] - previousPosition.z) * kReplicaBlend;
+        actor->world.rot.x = InterpolateRotation(previousWorldRotation.x, message.worldRotation[0], kReplicaBlend);
+        actor->world.rot.y = InterpolateRotation(previousWorldRotation.y, message.worldRotation[1], kReplicaBlend);
+        actor->world.rot.z = InterpolateRotation(previousWorldRotation.z, message.worldRotation[2], kReplicaBlend);
+        actor->shape.rot.x = InterpolateRotation(previousShapeRotation.x, message.shapeRotation[0], kReplicaBlend);
+        actor->shape.rot.y = InterpolateRotation(previousShapeRotation.y, message.shapeRotation[1], kReplicaBlend);
+        actor->shape.rot.z = InterpolateRotation(previousShapeRotation.z, message.shapeRotation[2], kReplicaBlend);
+        actor->prevPos = previousPosition;
+    } else {
+        actor->world.pos = { message.position[0], message.position[1], message.position[2] };
+        actor->world.rot = { message.worldRotation[0], message.worldRotation[1], message.worldRotation[2] };
+        actor->shape.rot = { message.shapeRotation[0], message.shapeRotation[1], message.shapeRotation[2] };
+        actor->prevPos = actor->world.pos;
+    }
     return true;
 }
 
@@ -552,6 +813,7 @@ void Manager::Update() {
     for (const Packet& packet : transport.TakeIncomingPackets()) {
         HandlePacket(packet);
     }
+    UpdateStoryEvent();
 
     if (transportState == TransportState::Error) {
         DestroyRemotePlayer();
@@ -618,6 +880,9 @@ void Manager::Update() {
         SendClockSnapshot();
     }
 
+    if (handshakeComplete) {
+        UpdateTransportTelemetry();
+    }
     UpdateAutomatedTest();
 }
 
@@ -660,7 +925,60 @@ bool Manager::IsPreparingRemotePlayer() const {
 }
 
 TransportTelemetry Manager::GetTransportTelemetry() const {
-    return transport.GetTelemetry();
+    TransportTelemetry telemetry = transport.GetTelemetry();
+    telemetry.realtimeBytesSentPerSecond = realtimeBytesSentPerSecond;
+    telemetry.realtimeBytesReceivedPerSecond = realtimeBytesReceivedPerSecond;
+    telemetry.tcpBytesSentPerSecond = tcpBytesSentPerSecond;
+    telemetry.tcpBytesReceivedPerSecond = tcpBytesReceivedPerSecond;
+    telemetry.realtimeDatagramsSentPerSecond = realtimeDatagramsSentPerSecond;
+    telemetry.realtimeDatagramsReceivedPerSecond = realtimeDatagramsReceivedPerSecond;
+    return telemetry;
+}
+
+void Manager::UpdateTransportTelemetry() {
+    constexpr uint64_t kTelemetryIntervalMs = 5000;
+    const uint64_t now = SDL_GetTicks64();
+    if (transportTelemetrySampleAtMs != 0 && now - transportTelemetrySampleAtMs < kTelemetryIntervalMs) {
+        return;
+    }
+
+    const TransportTelemetry current = transport.GetTelemetry();
+    if (transportTelemetrySampleAtMs == 0) {
+        transportTelemetrySampleAtMs = now;
+        previousTransportTelemetry = current;
+        return;
+    }
+
+    const uint64_t elapsedMs = now - transportTelemetrySampleAtMs;
+    const auto rate = [elapsedMs](uint64_t currentValue, uint64_t previousValue) {
+        return currentValue >= previousValue ? (currentValue - previousValue) * 1000 / elapsedMs : 0ULL;
+    };
+    realtimeBytesSentPerSecond = rate(current.realtimeBytesSent, previousTransportTelemetry.realtimeBytesSent);
+    realtimeBytesReceivedPerSecond =
+        rate(current.realtimeBytesReceived, previousTransportTelemetry.realtimeBytesReceived);
+    tcpBytesSentPerSecond = rate(current.tcpBytesSent, previousTransportTelemetry.tcpBytesSent);
+    tcpBytesReceivedPerSecond = rate(current.tcpBytesReceived, previousTransportTelemetry.tcpBytesReceived);
+    realtimeDatagramsSentPerSecond =
+        rate(current.realtimeDatagramsSent, previousTransportTelemetry.realtimeDatagramsSent);
+    realtimeDatagramsReceivedPerSecond =
+        rate(current.realtimeDatagramsReceived, previousTransportTelemetry.realtimeDatagramsReceived);
+    const uint64_t retryRate =
+        rate(current.acknowledgedEventRetries, previousTransportTelemetry.acknowledgedEventRetries);
+    const uint64_t fallbackRate =
+        rate(current.acknowledgedEventFallbacks, previousTransportTelemetry.acknowledgedEventFallbacks);
+
+    SPDLOG_INFO(
+        "[HyruleCoop] Network traffic: tx={} B/s (UDP {}, TCP {}), rx={} B/s (UDP {}, TCP {}), UDP packets "
+        "tx={}/s rx={}/s, RTT={} ms jitter={} ms, queues reliable={} incoming={} pendingAcks={}, retries={}/s "
+        "fallbacks={}/s",
+        realtimeBytesSentPerSecond + tcpBytesSentPerSecond, realtimeBytesSentPerSecond, tcpBytesSentPerSecond,
+        realtimeBytesReceivedPerSecond + tcpBytesReceivedPerSecond, realtimeBytesReceivedPerSecond,
+        tcpBytesReceivedPerSecond, realtimeDatagramsSentPerSecond, realtimeDatagramsReceivedPerSecond,
+        current.roundTripMs, current.roundTripJitterMs, current.reliableQueueDepth, current.incomingQueueDepth,
+        current.pendingAcknowledgements, retryRate, fallbackRate);
+
+    previousTransportTelemetry = current;
+    transportTelemetrySampleAtMs = now;
 }
 
 const PlayerSnapshotMessage* Manager::GetRemotePlayerSnapshot() const {
@@ -866,6 +1184,8 @@ void Manager::RegisterHooks(bool enabled) {
         localDekuBabas.clear();
         localGohmas.clear();
         localGenericEnemies.clear();
+        localJabuActors.clear();
+        localBarinadeActors.clear();
         ClearStalchildSceneState();
         if (automatedTestEnabled && !automatedTestClient && gPlayState != nullptr &&
             gPlayState->sceneNum == SCENE_DEKU_TREE_BOSS) {
@@ -955,6 +1275,10 @@ void Manager::RegisterHooks(bool enabled) {
             return;
         }
         if (transport.GetRole() == SessionRole::Host) {
+            if (handshakeComplete && flagType == FLAG_EVENT_CHECK_INF &&
+                flag == EVENTCHKINF_ZELDA_FLED_HYRULE_CASTLE) {
+                castleEscapeStoryPending = true;
+            }
             CaptureCanonicalProgression();
             ++progressionRevision;
             if (handshakeComplete) {
@@ -1037,13 +1361,41 @@ void Manager::RegisterHooks(bool enabled) {
                 ReportAutomatedTest("stalchild-host-physical-collision",
                                     "hit=" + std::to_string(automatedTestPhysicalHits));
             }
+            if (automatedTestEnabled && automatedTestStage == TestStalchildCombat && actor != nullptr &&
+                automatedTestTargetActor == actor && automatedTestStalchildDeathTransitionObserved) {
+                ReportAutomatedTest("stalchild-native-death-complete",
+                                    "native dying action reached its terminal Actor_Kill");
+            }
             SendStalchildSnapshot(actor, false);
         }
     });
     COND_ID_HOOK(OnActorDestroy, ACTOR_EN_SKB, enabled, [this](void* actor) { ForgetStalchild(actor); });
-    COND_HOOK(OnActorUpdate, enabled, [this](void* actor) { UpdateGenericEnemy(actor); });
-    COND_HOOK(ShouldActorUpdate, enabled,
-              [this](void* actor, bool* shouldUpdate) { ApplyGenericEnemyAuthority(actor, shouldUpdate); });
+    COND_ID_HOOK(OnActorInit, ACTOR_EN_ITEM00, enabled, [this](void* actorRef) {
+        if (!automatedTestEnabled || automatedTestClient || automatedTestStage != TestStalchildCombat ||
+            automatedTestTargetActor == nullptr || actorRef == nullptr || automatedTestStalchildDropObserved) {
+            return;
+        }
+        const Actor* item = static_cast<const Actor*>(actorRef);
+        const Actor* target = static_cast<const Actor*>(automatedTestTargetActor);
+        const float deltaX = item->world.pos.x - target->world.pos.x;
+        const float deltaY = item->world.pos.y - target->world.pos.y;
+        const float deltaZ = item->world.pos.z - target->world.pos.z;
+        if (SQ(deltaX) + SQ(deltaY) + SQ(deltaZ) <= SQ(180.0f)) {
+            automatedTestStalchildDropObserved = true;
+            ReportAutomatedTest("stalchild-native-drop-spawned",
+                                "native death path created a nearby collectible");
+        }
+    });
+    COND_HOOK(OnActorUpdate, enabled, [this](void* actor) {
+        UpdateBarinade(actor);
+        UpdateJabuActor(actor);
+        UpdateGenericEnemy(actor);
+    });
+    COND_HOOK(ShouldActorUpdate, enabled, [this](void* actor, bool* shouldUpdate) {
+        ApplyBarinadeAuthority(actor, shouldUpdate);
+        ApplyJabuActorAuthority(actor, shouldUpdate);
+        ApplyGenericEnemyAuthority(actor, shouldUpdate);
+    });
     COND_HOOK(OnActorKill, enabled, [this](void* actor) {
         if (transport.GetRole() == SessionRole::Host) {
             if (automatedTestEnabled && automatedTestStage == TestGenericCombat && actor != nullptr &&
@@ -1055,10 +1407,16 @@ void Manager::RegisterHooks(bool enabled) {
                                         "hit=" + std::to_string(automatedTestPhysicalHits));
                 }
             }
+            SendBarinadeSnapshot(actor, false);
+            SendJabuActorSnapshot(actor, false);
             SendGenericEnemySnapshot(actor, false);
         }
     });
-    COND_HOOK(OnActorDestroy, enabled, [this](void* actor) { ForgetGenericEnemy(actor); });
+    COND_HOOK(OnActorDestroy, enabled, [this](void* actor) {
+        ForgetBarinade(actor);
+        ForgetJabuActor(actor);
+        ForgetGenericEnemy(actor);
+    });
     COND_ID_HOOK(OnActorUpdate, ACTOR_EN_KZ, enabled, [this](void* actor) { ReconcileKingZora(actor); });
     COND_ID_HOOK(ShouldActorUpdate, ACTOR_BG_SPOT08_BAKUDANKABE, enabled,
                  [this](void* actor, bool*) { ReconcileZorasFountainBombableWall(actor); });
@@ -1086,12 +1444,22 @@ void Manager::ResetPeerState() {
     pendingGuestAttackRequests.clear();
     lastGuestAttackTick.clear();
     localGenericEnemies.clear();
+    localJabuActors.clear();
+    localBarinadeActors.clear();
     localStalchildren.clear();
     retiredStalchildren.clear();
     stalchildIdentityRegistry.Clear();
     stalchildSnapshotLifecycle.Clear();
     spawningReplicatedStalchild = false;
     genericGuestTargetsHitThisSwing.clear();
+    transportTelemetrySampleAtMs = 0;
+    previousTransportTelemetry = {};
+    realtimeBytesSentPerSecond = 0;
+    realtimeBytesReceivedPerSecond = 0;
+    tcpBytesSentPerSecond = 0;
+    tcpBytesReceivedPerSecond = 0;
+    realtimeDatagramsSentPerSecond = 0;
+    realtimeDatagramsReceivedPerSecond = 0;
     protocolError.clear();
 }
 
@@ -1119,8 +1487,13 @@ void Manager::ResetSessionState() {
     canonicalProgressionCaptured = false;
     localDekuBabas.clear();
     localGohmas.clear();
+    localJabuActors.clear();
+    localBarinadeActors.clear();
     ClearStalchildSessionState();
     actorSnapshots.clear();
+    castleEscapeStoryPending = false;
+    castleEscapeStoryActive = false;
+    castleEscapeCutsceneObserved = false;
 }
 
 void Manager::BeginHandshakeIfNeeded() {
@@ -1463,8 +1836,12 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
     }
     const bool stalchildSnapshot = message->actorId == ACTOR_EN_SKB && IsDynamicStalchildEntityId(message->entityId) &&
                                    message->scene == SCENE_HYRULE_FIELD && message->room == 0;
+    const bool jabuSnapshot = IsJabuActorId(message->actorId) &&
+                              message->adapterWordCount == kJabuActorAdapterWordCount;
+    const bool barinadeSnapshot = message->actorId == ACTOR_BOSS_VA &&
+                                  message->adapterWordCount == kBarinadeAdapterWordCount;
     const bool specializedSnapshot = message->actorId == ACTOR_EN_DEKUBABA || message->actorId == ACTOR_BOSS_GOMA ||
-                                     stalchildSnapshot;
+                                     stalchildSnapshot || jabuSnapshot || barinadeSnapshot;
     const bool genericBaselineSnapshot = message->adapterWordCount == 0 && !specializedSnapshot &&
                                          IsGenericEnemyAdapterActorId(message->actorId);
     if (!specializedSnapshot && !genericBaselineSnapshot) {
@@ -1529,12 +1906,47 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
             ClearPendingGuestAttack(message->entityId);
             lastGuestAttackTick.erase(message->entityId);
             genericGuestTargetsHitThisSwing.erase(message->entityId);
+            if (guestStalchildTargetThisSwing == message->entityId) {
+                guestStalchildTargetThisSwing.reset();
+            }
             stalchildTargets.erase(message->entityId);
             stalchildAttackSequences.erase(message->entityId);
             appliedStalchildAttackSequences.erase(message->entityId);
             return;
         }
         EnsureRemoteStalchild(*message);
+    } else if (jabuSnapshot) {
+        const auto local = localJabuActors.find(message->entityId);
+        if (local == localJabuActors.end()) {
+            return;
+        }
+        Actor* actor = static_cast<Actor*>(local->second);
+        if (!message->alive) {
+            ClearLocalTarget(actor);
+            Actor_Kill(actor);
+            ClearPendingGuestAttack(message->entityId);
+            lastGuestAttackTick.erase(message->entityId);
+            genericGuestTargetsHitThisSwing.erase(message->entityId);
+            localJabuActors.erase(local);
+            return;
+        }
+        ApplyJabuActorSnapshot(actor, *message);
+    } else if (barinadeSnapshot) {
+        const auto local = localBarinadeActors.find(message->entityId);
+        if (local == localBarinadeActors.end()) {
+            return;
+        }
+        Actor* actor = static_cast<Actor*>(local->second);
+        if (!message->alive) {
+            ClearLocalTarget(actor);
+            Actor_Kill(actor);
+            ClearPendingGuestAttack(message->entityId);
+            lastGuestAttackTick.erase(message->entityId);
+            genericGuestTargetsHitThisSwing.erase(message->entityId);
+            localBarinadeActors.erase(local);
+            return;
+        }
+        ApplyBarinadeSnapshot(actor, *message);
     } else {
         const auto local = localGenericEnemies.find(message->entityId);
         if (local == localGenericEnemies.end()) {
@@ -1573,6 +1985,9 @@ void Manager::HandleBarrierSnapshot(const Packet& packet) {
     }
     if (message->state.phase != BarrierPhase::WaitingForParticipants) {
         return;
+    }
+    if (message->state.targetCutsceneIndex >= 0) {
+        gSaveContext.nextCutsceneIndex = static_cast<uint16_t>(message->state.targetCutsceneIndex);
     }
     if (!PrepareBarrierTimeline(message->state)) {
         return;
@@ -1615,7 +2030,8 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     const auto message = DecodeAttackIntent(packet.payload);
     if (!message.has_value() || !IsCurrentScope(message->scope) || message->participantId != 2 ||
         message->requestId == 0 || message->entityId == 0 ||
-        (message->attackKind != 1 && message->attackKind != 2 && message->attackKind != 3)) {
+        (message->attackKind != 1 && message->attackKind != 2 && message->attackKind != 3 &&
+         message->attackKind != 4)) {
         if (automatedTestEnabled) {
             ReportAutomatedTest("attack-intent-invalid",
                                 "decoded=" + std::to_string(message.has_value()) +
@@ -1657,6 +2073,8 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     const auto baba = localDekuBabas.find(message->entityId);
     const auto gohma = localGohmas.find(message->entityId);
     const auto genericEnemy = localGenericEnemies.find(message->entityId);
+    const auto jabuActor = localJabuActors.find(message->entityId);
+    const auto barinadeActor = localBarinadeActors.find(message->entityId);
     const auto stalchild = localStalchildren.find(message->entityId);
     const int64_t attackStateDelta = static_cast<int64_t>(message->playerTick) -
                                      static_cast<int64_t>(remotePlayerSnapshot.has_value()
@@ -1694,24 +2112,40 @@ void Manager::HandleAttackIntent(const Packet& packet) {
                 automatedTestFirstDamageObserved = true;
                 ReportAutomatedTest("generic-enemy-host-damage-accepted", "health=2 -> health=1");
             }
-        } else if (message->attackKind == 3 && stalchild != localStalchildren.end() &&
-                   (!automatedTestEnabled || automatedTestStage != TestStalchildCombat ||
-                    message->entityId == automatedTestTargetEntityId)) {
+        } else if (message->attackKind == 3 && stalchild != localStalchildren.end()) {
             Actor* actor = static_cast<Actor*>(stalchild->second);
-            actor->colChkInfo.health = state->second.health;
-            const bool alive = DamageGenericEnemy(actor, 1);
-            const int16_t authoritativeHealth = alive ? actor->colChkInfo.health : 0;
-            SendStalchildSnapshot(actor, alive);
-            accepted = true;
-            if (automatedTestEnabled && automatedTestStage == TestStalchildCombat) {
-                ++automatedTestPhysicalHits;
-                if (authoritativeHealth == 1) {
-                    automatedTestFirstDamageObserved = true;
+            EnSkb* stalchildActor = reinterpret_cast<EnSkb*>(actor);
+            if (actor->colChkInfo.health > 0 && stalchildActor->actionState != 1) {
+                const int16_t authoritativeHealth = EnSkb_ApplyCoopDamage(stalchildActor, gPlayState, 1);
+                // A zero-health Stalchild remains alive while its native dying animation produces body parts and a
+                // drop. The later OnActorKill hook sends the terminal snapshot.
+                SendStalchildSnapshot(actor, true);
+                accepted = true;
+                if (automatedTestEnabled && automatedTestStage == TestStalchildCombat) {
+                    ++automatedTestPhysicalHits;
+                    ReportAutomatedTest("stalchild-host-guest-hit-accepted",
+                                        "hit=" + std::to_string(automatedTestPhysicalHits) +
+                                            " health=" + std::to_string(authoritativeHealth));
+                    if (authoritativeHealth == 1) {
+                        automatedTestFirstDamageObserved = true;
+                    } else if (authoritativeHealth == 0 && stalchildActor->actionState == 1 &&
+                               !automatedTestStalchildDeathTransitionObserved) {
+                        automatedTestStalchildDeathTransitionObserved = true;
+                        ReportAutomatedTest("stalchild-native-death-started",
+                                            "guest lethal hit entered the native dying action");
+                    }
                 }
-                ReportAutomatedTest("stalchild-host-guest-hit-accepted",
-                                    "hit=" + std::to_string(automatedTestPhysicalHits) +
-                                        " health=" + std::to_string(authoritativeHealth));
             }
+        } else if (message->attackKind == 4 && jabuActor != localJabuActors.end()) {
+            Actor* actor = static_cast<Actor*>(jabuActor->second);
+            accepted = ApplyJabuActorDamage(actor, message->damageEffect,
+                                            std::clamp<uint8_t>(message->damage, 0, 8));
+            SendJabuActorSnapshot(actor, true);
+        } else if (message->attackKind == 5 && barinadeActor != localBarinadeActors.end()) {
+            Actor* actor = static_cast<Actor*>(barinadeActor->second);
+            accepted = HyruleCoop_BarinadeApplyDamage(actor, gPlayState, message->damageEffect,
+                                                      std::clamp<uint8_t>(message->damage, 0, 8)) != 0;
+            SendBarinadeSnapshot(actor, true);
         }
     }
     if (automatedTestEnabled && !accepted) {
@@ -1732,7 +2166,9 @@ void Manager::HandleAttackIntent(const Packet& packet) {
                                 " distance-squared=" + std::to_string(distanceSquared) +
                                 " baba=" + std::to_string(baba != localDekuBabas.end()) +
                                 " gohma=" + std::to_string(gohma != localGohmas.end()) +
-                                " generic=" + std::to_string(genericEnemy != localGenericEnemies.end()));
+                                " generic=" + std::to_string(genericEnemy != localGenericEnemies.end()) +
+                                " jabu=" + std::to_string(jabuActor != localJabuActors.end()) +
+                                " barinade=" + std::to_string(barinadeActor != localBarinadeActors.end()));
     }
     requestLedger.Record(request, { accepted, message->entityId, frameCounter });
     const auto authoritativeState = actorSnapshots.find(message->entityId);
@@ -1833,8 +2269,15 @@ void Manager::HandleProgressionIntent(const Packet& packet) {
             const GetItemEntry entry = ItemTableManager::Instance->RetrieveItemEntry(MOD_NONE, getItemId);
             if (entry.itemId == message->itemId &&
                 IsSharedProgressionItem(entry.itemId, entry.modIndex, entry.getItemCategory)) {
-                Item_Give(gPlayState, static_cast<uint8_t>(entry.itemId));
-                accepted = true;
+                if ((entry.itemId == ITEM_COMPASS || entry.itemId == ITEM_DUNGEON_MAP) &&
+                    message->mapIndex < std::size(gSaveContext.inventory.dungeonItems)) {
+                    const uint8_t dungeonItem = static_cast<uint8_t>(entry.itemId - ITEM_KEY_BOSS);
+                    gSaveContext.inventory.dungeonItems[message->mapIndex] |= gBitFlags[dungeonItem];
+                    accepted = true;
+                } else if (entry.itemId != ITEM_COMPASS && entry.itemId != ITEM_DUNGEON_MAP) {
+                    Item_Give(gPlayState, static_cast<uint8_t>(entry.itemId));
+                    accepted = true;
+                }
             }
         }
     } else if (message->kind == ProgressionIntentKind::DungeonKeyUsed &&
@@ -1857,6 +2300,10 @@ void Manager::HandleProgressionIntent(const Packet& packet) {
         accepted = true;
     }
     applyingAuthoritativeState = false;
+    if (accepted && message->kind == ProgressionIntentKind::GlobalFlagChanged && message->set &&
+        message->flagType == FLAG_EVENT_CHECK_INF && message->flag == EVENTCHKINF_ZELDA_FLED_HYRULE_CASTLE) {
+        castleEscapeStoryPending = true;
+    }
     if (accepted) {
         CaptureCanonicalProgression();
         ++progressionRevision;
@@ -2055,7 +2502,8 @@ void Manager::SendBarrierReady() {
                                         gPlayState->roomCtx.curRoom.num }));
 }
 
-void Manager::SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackKind) {
+void Manager::SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackKind, uint8_t damageEffect,
+                               uint8_t damage) {
     if (!handshakeComplete || transport.GetRole() != SessionRole::Client || entityId == 0) {
         return;
     }
@@ -2067,6 +2515,8 @@ void Manager::SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackK
     message.playerTick = frameCounter;
     message.scene = scene;
     message.attackKind = attackKind;
+    message.damageEffect = damageEffect;
+    message.damage = std::max<uint8_t>(1, damage);
     if (transport.SendRepeatedRealtime(MessageType::AttackIntent, EncodeAttackIntent(message), message.entityId)) {
         pendingGuestAttackRequests[entityId] = message.requestId;
         if (automatedTestEnabled) {
@@ -2245,6 +2695,261 @@ void Manager::ForgetDekuBaba(void* actor) {
     }
 }
 
+void Manager::SendJabuActorSnapshot(void* actorRef, bool alive) {
+    if (transport.GetRole() != SessionRole::Host || !IsSaveLoaded() || actorRef == nullptr) {
+        return;
+    }
+    Actor* canonical = CanonicalJabuActor(static_cast<Actor*>(actorRef));
+    if (canonical == nullptr || (!alive &&
+        std::none_of(localJabuActors.begin(), localJabuActors.end(),
+                     [canonical](const auto& entry) { return entry.second == canonical; }))) {
+        return;
+    }
+
+    ActorSnapshotMessage message =
+        CaptureJabuActorSnapshot(canonical, gPlayState->sceneNum, frameCounter, sessionScope, alive);
+    if (message.adapterWordCount != kJabuActorAdapterWordCount) {
+        const auto lastKnown = actorSnapshots.find(message.entityId);
+        if (alive || lastKnown == actorSnapshots.end()) {
+            return;
+        }
+        message = lastKnown->second;
+        message.hostTick = frameCounter;
+        message.alive = false;
+    }
+    const auto previous = actorSnapshots.find(message.entityId);
+    const bool importantTransition = previous == actorSnapshots.end() || previous->second.alive != message.alive ||
+                                     previous->second.health != message.health ||
+                                     previous->second.stateId != message.stateId;
+    actorSnapshots[message.entityId] = message;
+    if (alive) {
+        localJabuActors[message.entityId] = canonical;
+    }
+    if (importantTransition) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    }
+}
+
+void Manager::UpdateJabuActor(void* actorRef) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    Actor* canonical = CanonicalJabuActor(actor);
+    if (canonical == nullptr || gPlayState == nullptr) {
+        return;
+    }
+    const uint64_t entityId = GetJabuActorEntityId(canonical, gPlayState->sceneNum, sessionScope.worldGeneration);
+    if (transport.GetRole() == SessionRole::Host) {
+        localJabuActors[entityId] = canonical;
+        if (actor == canonical && frameCounter % 2 == 0) {
+            SendJabuActorSnapshot(canonical, true);
+        }
+        return;
+    }
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsRemoteTimelineCompatible()) {
+        return;
+    }
+
+    localJabuActors[entityId] = canonical;
+    if (actor->colChkInfo.health > 0 && actor->colChkInfo.health < kGuestEnemyHealthSentinel &&
+        !genericGuestTargetsHitThisSwing.contains(entityId) && !pendingGuestAttacks.contains(entityId)) {
+        const uint8_t damage = static_cast<uint8_t>(
+            std::clamp<int16_t>(kGuestEnemyHealthSentinel - actor->colChkInfo.health, 1, 8));
+        genericGuestTargetsHitThisSwing.insert(entityId);
+        pendingGuestAttacks.insert(entityId);
+        lastGuestAttackTick[entityId] = frameCounter;
+        SendAttackIntent(entityId, gPlayState->sceneNum, 4, actor->colChkInfo.damageEffect, damage);
+    }
+
+    if (actor != canonical) {
+        return;
+    }
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot == actorSnapshots.end()) {
+        return;
+    }
+    if (!snapshot->second.alive) {
+        ClearLocalTarget(canonical);
+        Actor_Kill(canonical);
+        ClearPendingGuestAttack(entityId);
+        lastGuestAttackTick.erase(entityId);
+        genericGuestTargetsHitThisSwing.erase(entityId);
+        localJabuActors.erase(entityId);
+        return;
+    }
+    ApplyJabuActorSnapshot(canonical, snapshot->second);
+}
+
+void Manager::ApplyJabuActorAuthority(void* actorRef, bool* shouldUpdate) {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Client || !IsSaveLoaded() ||
+        actorRef == nullptr || shouldUpdate == nullptr || gPlayState == nullptr || !IsRemoteTimelineCompatible()) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    Actor* canonical = CanonicalJabuActor(actor);
+    if (canonical == nullptr) {
+        return;
+    }
+    const uint64_t entityId = GetJabuActorEntityId(canonical, gPlayState->sceneNum, sessionScope.worldGeneration);
+    localJabuActors[entityId] = canonical;
+    uint8_t damageEffect = 0;
+    uint8_t damage = 0;
+    if (!genericGuestTargetsHitThisSwing.contains(entityId) && !pendingGuestAttacks.contains(entityId) &&
+        PeekJabuActorDamage(actor, &damageEffect, &damage)) {
+        genericGuestTargetsHitThisSwing.insert(entityId);
+        pendingGuestAttacks.insert(entityId);
+        lastGuestAttackTick[entityId] = frameCounter;
+        SendAttackIntent(entityId, gPlayState->sceneNum, 4, damageEffect, damage);
+    }
+    // The first authoritative snapshot may arrive after this actor's first local collision. Keep that window
+    // nonlethal while still allowing the native actor update to report guest hit intent.
+    if (actor->colChkInfo.health > 0) {
+        actor->colChkInfo.health = kGuestEnemyHealthSentinel;
+    }
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot == actorSnapshots.end()) {
+        return;
+    }
+    if (!snapshot->second.alive) {
+        if (actor == canonical) {
+            ClearLocalTarget(canonical);
+            Actor_Kill(canonical);
+            localJabuActors.erase(entityId);
+        }
+        *shouldUpdate = false;
+        return;
+    }
+}
+
+void Manager::ForgetJabuActor(void* actorRef) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    Actor* canonical = CanonicalJabuActor(actor);
+    for (auto iterator = localJabuActors.begin(); iterator != localJabuActors.end();) {
+        if (iterator->second == actorRef || iterator->second == canonical) {
+            ClearPendingGuestAttack(iterator->first);
+            lastGuestAttackTick.erase(iterator->first);
+            genericGuestTargetsHitThisSwing.erase(iterator->first);
+            iterator = localJabuActors.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
+void Manager::SendBarinadeSnapshot(void* actorRef, bool alive) {
+    if (transport.GetRole() != SessionRole::Host || !IsSaveLoaded() || actorRef == nullptr || gPlayState == nullptr) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    const bool knownActor = std::any_of(localBarinadeActors.begin(), localBarinadeActors.end(),
+                                        [actor](const auto& entry) { return entry.second == actor; });
+    if (actor->id != ACTOR_BOSS_VA || (!alive && !knownActor)) {
+        return;
+    }
+
+    ActorSnapshotMessage message =
+        CaptureBarinadeSnapshot(actor, gPlayState->sceneNum, frameCounter, sessionScope, alive);
+    if (alive && message.adapterWordCount != kBarinadeAdapterWordCount) {
+        return;
+    }
+    const auto previous = actorSnapshots.find(message.entityId);
+    bool importantTransition = previous == actorSnapshots.end() || previous->second.alive != message.alive ||
+                               previous->second.health != message.health || previous->second.stateId != message.stateId;
+    if (!importantTransition && previous->second.adapterWordCount == kBarinadeAdapterWordCount) {
+        HyruleCoopBarinadeState previousState{};
+        HyruleCoopBarinadeState currentState{};
+        std::memcpy(&previousState, previous->second.adapterState.data(), sizeof(previousState));
+        std::memcpy(&currentState, message.adapterState.data(), sizeof(currentState));
+        importantTransition = previousState.phase != currentState.phase || previousState.isDead != currentState.isDead;
+    }
+    actorSnapshots[message.entityId] = message;
+    if (alive) {
+        localBarinadeActors[message.entityId] = actor;
+    }
+    if (importantTransition) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    }
+}
+
+void Manager::UpdateBarinade(void* actorRef) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    if (actor == nullptr || actor->id != ACTOR_BOSS_VA || gPlayState == nullptr) {
+        return;
+    }
+    const uint64_t entityId = GetBarinadeEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    if (transport.GetRole() == SessionRole::Host) {
+        localBarinadeActors[entityId] = actor;
+        const uint32_t snapshotInterval = HyruleCoop_BarinadeIsCanonicalRoot(actor) ? 3 : 6;
+        if (frameCounter % snapshotInterval == 0) {
+            SendBarinadeSnapshot(actor, true);
+        }
+        return;
+    }
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsRemoteTimelineCompatible()) {
+        return;
+    }
+
+    localBarinadeActors[entityId] = actor;
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot == actorSnapshots.end()) {
+        return;
+    }
+    if (!snapshot->second.alive) {
+        ClearLocalTarget(actor);
+        Actor_Kill(actor);
+        ClearPendingGuestAttack(entityId);
+        lastGuestAttackTick.erase(entityId);
+        genericGuestTargetsHitThisSwing.erase(entityId);
+        localBarinadeActors.erase(entityId);
+        return;
+    }
+    ApplyBarinadeSnapshot(actor, snapshot->second);
+}
+
+void Manager::ApplyBarinadeAuthority(void* actorRef, bool* shouldUpdate) {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Client || !IsSaveLoaded() ||
+        actorRef == nullptr || shouldUpdate == nullptr || gPlayState == nullptr || !IsRemoteTimelineCompatible()) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    if (actor->id != ACTOR_BOSS_VA) {
+        return;
+    }
+    const uint64_t entityId = GetBarinadeEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    localBarinadeActors[entityId] = actor;
+    uint8_t damageEffect = 0;
+    uint8_t damage = 0;
+    if (!genericGuestTargetsHitThisSwing.contains(entityId) && !pendingGuestAttacks.contains(entityId) &&
+        HyruleCoop_BarinadeConsumeDamage(actor, &damageEffect, &damage)) {
+        genericGuestTargetsHitThisSwing.insert(entityId);
+        pendingGuestAttacks.insert(entityId);
+        lastGuestAttackTick[entityId] = frameCounter;
+        SendAttackIntent(entityId, gPlayState->sceneNum, 5, damageEffect, damage);
+    }
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot != actorSnapshots.end() && !snapshot->second.alive) {
+        ClearLocalTarget(actor);
+        Actor_Kill(actor);
+        localBarinadeActors.erase(entityId);
+        *shouldUpdate = false;
+    }
+}
+
+void Manager::ForgetBarinade(void* actorRef) {
+    for (auto iterator = localBarinadeActors.begin(); iterator != localBarinadeActors.end();) {
+        if (iterator->second == actorRef) {
+            ClearPendingGuestAttack(iterator->first);
+            lastGuestAttackTick.erase(iterator->first);
+            genericGuestTargetsHitThisSwing.erase(iterator->first);
+            iterator = localBarinadeActors.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
 void Manager::SendGenericEnemySnapshot(void* actorRef, bool alive) {
     if (transport.GetRole() != SessionRole::Host || !IsSaveLoaded() || actorRef == nullptr) {
         return;
@@ -2413,9 +3118,11 @@ void Manager::SendStalchildSnapshot(void* actorRef, bool alive) {
         return;
     }
 
+    EnSkb* stalchild = reinterpret_cast<EnSkb*>(actor);
     uint64_t entityId = stalchildIdentityRegistry.Find(actor);
     if (alive) {
-        if (actor->colChkInfo.health <= 0) {
+        const bool nativeDeathTransition = actor->colChkInfo.health == 0 && stalchild->actionState == 1;
+        if (actor->colChkInfo.health <= 0 && !nativeDeathTransition) {
             return;
         }
         entityId = stalchildIdentityRegistry.GetOrAssign(actor);
@@ -2442,7 +3149,6 @@ void Manager::SendStalchildSnapshot(void* actorRef, bool alive) {
     const auto target = stalchildTargets.find(entityId);
     const StalchildTarget selectedTarget =
         target == stalchildTargets.end() ? StalchildTarget::Host : target->second;
-    const EnSkb* stalchild = reinterpret_cast<const EnSkb*>(actor);
     const auto previous = actorSnapshots.find(entityId);
     const bool attackActive = stalchild->setColliderAT != 0;
     const bool attackStarted = attackActive &&
@@ -2502,7 +3208,7 @@ void Manager::UpdateStalchild(void* actorRef) {
         return;
     }
     if (transport.GetRole() == SessionRole::Host) {
-        if (frameCounter % 2 == 0) {
+        if (frameCounter % kStalchildSnapshotIntervalFrames == 0) {
             SendStalchildSnapshot(actorRef, true);
         }
         return;
@@ -2575,26 +3281,45 @@ void Manager::ApplyStalchildAuthority(void* actorRef, bool* shouldUpdate) {
         ClearPendingGuestAttack(entityId);
         lastGuestAttackTick.erase(entityId);
         genericGuestTargetsHitThisSwing.erase(entityId);
+        if (guestStalchildTargetThisSwing == entityId) {
+            guestStalchildTargetThisSwing.reset();
+        }
         localStalchildren.erase(local);
         *shouldUpdate = false;
         return;
     }
 
     Player* player = GET_PLAYER(gPlayState);
+    EnSkb* stalchildReplica = reinterpret_cast<EnSkb*>(actor);
     const bool participatesInAutomatedCombat =
         !automatedTestEnabled || automatedTestStage != TestStalchildCombat || automatedTestTargetEntityId == 0 ||
         entityId == automatedTestTargetEntityId;
-    const bool nativeSwordHit = participatesInAutomatedCombat && player != nullptr && player->meleeWeaponState > 0 &&
-                                actor->colChkInfo.health < kGuestEnemyHealthSentinel;
+    const bool nativeSwordHit = player != nullptr && player->meleeWeaponState > 0 &&
+                                (stalchildReplica->collider.base.acFlags & AC_HIT) != 0;
+    if ((stalchildReplica->collider.base.acFlags & AC_HIT) != 0) {
+        // Guest replicas do not run EnSkb_Update, so consume the collision edge here instead of leaving AC_HIT
+        // latched across every frame of the same sword action.
+        stalchildReplica->collider.base.acFlags &= ~AC_HIT;
+    }
     const auto previousHit = lastGuestAttackTick.find(entityId);
     const bool outsideDuplicateWindow =
         previousHit == lastGuestAttackTick.end() || frameCounter - previousHit->second >= 12;
-    const bool expectedAutomatedSwing =
-        !automatedTestEnabled || automatedTestStage != TestStalchildCombat ||
-        (automatedTestPhysicalHits == 0 && automatedTestCombatPhase == CombatFirstSwing) ||
-        (automatedTestPhysicalHits == 1 && automatedTestCombatPhase == CombatSecondSwing);
-    if (nativeSwordHit && !genericGuestTargetsHitThisSwing.contains(entityId) &&
-        !pendingGuestAttacks.contains(entityId) && outsideDuplicateWindow && expectedAutomatedSwing) {
+    std::optional<uint64_t> focusedStalchild;
+    if (player != nullptr && player->focusActor != nullptr) {
+        for (const auto& [candidateId, candidateActor] : localStalchildren) {
+            if (candidateActor == player->focusActor) {
+                focusedStalchild = candidateId;
+                break;
+            }
+        }
+    }
+    const bool intendedStalchild = focusedStalchild.has_value() ? focusedStalchild.value() == entityId : true;
+    const bool stalchildAvailableThisSwing = intendedStalchild &&
+                                             (!guestStalchildTargetThisSwing.has_value() ||
+                                              guestStalchildTargetThisSwing.value() == entityId);
+    if (nativeSwordHit && stalchildAvailableThisSwing && !genericGuestTargetsHitThisSwing.contains(entityId) &&
+        !pendingGuestAttacks.contains(entityId) && outsideDuplicateWindow) {
+        guestStalchildTargetThisSwing = entityId;
         genericGuestTargetsHitThisSwing.insert(entityId);
         pendingGuestAttacks.insert(entityId);
         lastGuestAttackTick[entityId] = frameCounter;
@@ -2620,7 +3345,8 @@ void Manager::ApplyStalchildAuthority(void* actorRef, bool* shouldUpdate) {
         SendAttackIntent(entityId, gPlayState->sceneNum, 3);
     }
 
-    ApplyStalchildSnapshot(actor, snapshot->second);
+    ApplyStalchildSnapshot(actor, snapshot->second, false);
+    EnSkb_AdvanceCoopAnimation(stalchildReplica);
     if (IsStalchildTargetable(snapshot->second.stateId)) {
         actor->flags |= ACTOR_FLAG_ATTENTION_ENABLED;
     } else {
@@ -2629,7 +3355,6 @@ void Manager::ApplyStalchildAuthority(void* actorRef, bool* shouldUpdate) {
 
     // The host advances private Stalchild AI. The guest is a render/collision replica whose sword AC remains a local
     // physical contact probe. Enemy damage is applied from the acknowledged host attack edge below.
-    actor->colChkInfo.health = kGuestEnemyHealthSentinel;
     const bool attacksGuest = participatesInAutomatedCombat &&
                               DecodeStalchildTarget(snapshot->second.stateId) == StalchildTarget::Guest &&
                               snapshot->second.adapterState[kStalchildAdapterAttackActive] != 0;
@@ -2654,9 +3379,7 @@ void Manager::ApplyStalchildAuthority(void* actorRef, bool* shouldUpdate) {
             }
         }
     }
-    if (participatesInAutomatedCombat) {
-        EnSkb_RegisterCoopCollisions(reinterpret_cast<EnSkb*>(actor), gPlayState, false);
-    }
+    EnSkb_RegisterCoopCollisions(stalchildReplica, gPlayState, false);
     *shouldUpdate = false;
 }
 
@@ -2668,13 +3391,8 @@ void Manager::EnsureRemoteStalchild(const ActorSnapshotMessage& message) {
 
     const auto existing = localStalchildren.find(message.entityId);
     if (existing != localStalchildren.end()) {
-        Actor* actor = static_cast<Actor*>(existing->second);
-        ApplyStalchildSnapshot(actor, message);
-        if (IsStalchildTargetable(message.stateId)) {
-            actor->flags |= ACTOR_FLAG_ATTENTION_ENABLED;
-        } else {
-            actor->flags &= ~ACTOR_FLAG_ATTENTION_ENABLED;
-        }
+        // The per-frame authority hook interpolates toward the newest snapshot. Applying packets here as well makes
+        // arrival jitter visible and advances replicas twice on packet frames.
         return;
     }
 
@@ -2697,7 +3415,7 @@ void Manager::EnsureRemoteStalchild(const ActorSnapshotMessage& message) {
         Actor_Kill(actor);
         return;
     }
-    ApplyStalchildSnapshot(actor, message);
+    ApplyStalchildSnapshot(actor, message, true);
     if (IsStalchildTargetable(message.stateId)) {
         actor->flags |= ACTOR_FLAG_ATTENTION_ENABLED;
     } else {
@@ -2717,6 +3435,9 @@ void Manager::ForgetStalchild(void* actorRef) {
             ClearPendingGuestAttack(entityId);
             lastGuestAttackTick.erase(entityId);
             genericGuestTargetsHitThisSwing.erase(entityId);
+            if (guestStalchildTargetThisSwing == entityId) {
+                guestStalchildTargetThisSwing.reset();
+            }
             stalchildTargets.erase(entityId);
             stalchildAttackSequences.erase(entityId);
             appliedStalchildAttackSequences.erase(entityId);
@@ -2745,6 +3466,7 @@ void Manager::ClearStalchildSceneState() {
     stalchildAttackSequences.clear();
     appliedStalchildAttackSequences.clear();
     retiredStalchildren.clear();
+    guestStalchildTargetThisSwing.reset();
     stalchildIdentityRegistry.Clear();
     stalchildSnapshotLifecycle.Clear();
     for (auto iterator = actorSnapshots.begin(); iterator != actorSnapshots.end();) {
@@ -2769,6 +3491,7 @@ void Manager::UpdateGenericGuestAttack() {
     Player* player = GET_PLAYER(gPlayState);
     if (player == nullptr || player->meleeWeaponState <= 0) {
         genericGuestTargetsHitThisSwing.clear();
+        guestStalchildTargetThisSwing.reset();
     }
 }
 
@@ -2938,10 +3661,10 @@ void Manager::InjectAutomatedTestInput(void* actorRef, bool*) {
         if (shouldSwing && combatPhaseElapsed >= swingOffset &&
             (combatPhaseElapsed - swingOffset) % 36 == 0) {
             buttons |= BTN_B;
-            if (automatedTestStage == TestStalchildCombat &&
-                automatedTestCombatPhase == CombatSecondSwing &&
-                combatPhaseElapsed == swingOffset) {
-                ReportAutomatedTest("stalchild-client-second-swing-input",
+            if (automatedTestStage == TestStalchildCombat && combatPhaseElapsed == swingOffset) {
+                ReportAutomatedTest(automatedTestCombatPhase == CombatFirstSwing
+                                        ? "stalchild-client-first-swing-input"
+                                        : "stalchild-client-second-swing-input",
                                     "single-frame B retries no faster than every 36 updates while lock-on remains active");
             }
         }
@@ -3132,6 +3855,9 @@ bool Manager::PrepareBarrierTimeline(const BarrierState& state) {
         if (state.targetEntrance >= 0) {
             gPlayState->nextEntranceIndex = state.targetEntrance;
         }
+        if (state.targetCutsceneIndex >= 0) {
+            gSaveContext.nextCutsceneIndex = static_cast<uint16_t>(state.targetCutsceneIndex);
+        }
         return false;
     }
     gSaveContext.linkAge = target.linkAge;
@@ -3153,6 +3879,61 @@ void Manager::PopulateBarrierTimeline(BarrierState& state) const {
     state.targetNight = gSaveContext.nightFlag != 0;
 }
 
+void Manager::BeginCastleEscapeStoryBarrier() {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Host || !IsSaveLoaded()) {
+        return;
+    }
+    castleEscapeStoryPending = false;
+    castleEscapeStoryActive = true;
+    castleEscapeCutsceneObserved = false;
+
+    BarrierState state;
+    state.operationEpoch = nextOperationEpoch++;
+    state.scope = sessionScope;
+    state.kind = BarrierKind::StoryEvent;
+    state.phase = BarrierPhase::Prepare;
+    state.manifestHash = HashCapabilities(negotiatedCapabilities);
+    state.targetScene = SCENE_HYRULE_FIELD;
+    state.targetRoom = -1;
+    state.targetEntrance = ENTR_HYRULE_FIELD_PAST_BRIDGE_SPAWN;
+    state.targetCutsceneIndex = 0xFFF1;
+    PopulateBarrierTimeline(state);
+    state.deadlineTick = static_cast<uint64_t>(frameCounter) + 1200;
+    state.participants = { 1, 2 };
+    if (!barrierCoordinator.Begin(state) || !barrierCoordinator.WaitForParticipants()) {
+        castleEscapeStoryActive = false;
+        protocolError = "Could not coordinate Zelda's escape cutscene";
+        return;
+    }
+
+    gSaveContext.nextCutsceneIndex = 0xFFF1;
+    if (gPlayState->sceneNum == state.targetScene && IsBarrierTimelineReady(state) &&
+        gSaveContext.entranceIndex == state.targetEntrance) {
+        barrierCoordinator.MarkReady(1);
+    }
+    SendBarrierSnapshot();
+    if (!barrierCoordinator.GetState().readyParticipants.empty()) {
+        CompleteBarrierIfReady();
+    } else if (gPlayState->transitionTrigger != TRANS_TRIGGER_START) {
+        GameInteractor::RawAction::TeleportPlayerSilent(state.targetEntrance);
+    }
+}
+
+void Manager::UpdateStoryEvent() {
+    if (castleEscapeStoryPending && handshakeComplete && transport.GetRole() == SessionRole::Host) {
+        BeginCastleEscapeStoryBarrier();
+    }
+    if (!castleEscapeStoryActive || gPlayState == nullptr) {
+        return;
+    }
+    const bool cutsceneRunning = gSaveContext.cutsceneIndex >= 0xFFF0 || gPlayState->csCtx.state != CS_STATE_IDLE;
+    castleEscapeCutsceneObserved |= cutsceneRunning;
+    if (castleEscapeCutsceneObserved && !cutsceneRunning) {
+        castleEscapeStoryActive = false;
+        castleEscapeCutsceneObserved = false;
+    }
+}
+
 void Manager::BeginReconnectBarrier() {
     if (!handshakeComplete || transport.GetRole() != SessionRole::Host || !IsSaveLoaded()) {
         return;
@@ -3166,6 +3947,9 @@ void Manager::BeginReconnectBarrier() {
     state.targetScene = gPlayState->sceneNum;
     state.targetRoom = -1;
     state.targetEntrance = gSaveContext.entranceIndex;
+    if (castleEscapeStoryActive && gSaveContext.cutsceneIndex >= 0xFFF0) {
+        state.targetCutsceneIndex = gSaveContext.cutsceneIndex;
+    }
     PopulateBarrierTimeline(state);
     state.deadlineTick = static_cast<uint64_t>(frameCounter) + 600;
     state.participants = { 1, 2 };
@@ -3403,6 +4187,10 @@ void Manager::UpdateAutomatedTest() {
             gSaveContext.inventory.items[SLOT_HOOKSHOT] = ITEM_NONE;
             gSaveContext.inventory.items[SLOT_FARORES_WIND] = ITEM_NONE;
             gSaveContext.itemGetInf[ITEMGETINF_18_19_1A_INDEX] &= ~ITEMGETINF_18_MASK;
+            gSaveContext.inventory.dungeonItems[kAutomatedTestJabuDungeonIndex] &=
+                static_cast<uint8_t>(~kAutomatedTestJabuRewardMask);
+            gSaveContext.sceneFlags[SCENE_JABU_JABU].chest &=
+                ~(kAutomatedTestJabuMapChestMask | kAutomatedTestJabuCompassChestMask);
             gSaveContext.inventory.equipment &=
                 ~OWNED_EQUIP_FLAG(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_KOKIRI);
             gSaveContext.rupees = automatedTestClient ? 222 : 111;
@@ -3821,6 +4609,54 @@ void Manager::UpdateAutomatedTest() {
                                 "Hookshot, Kokiri Sword, and Farore's Wind shared; rupees, arrows, and current magic remained local");
             ReportAutomatedTest("derived-progression-repaired",
                                 "Cucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags");
+            SetAutomatedTestStage(TestAwaitingDungeonRewards, "dungeon-reward-test-started");
+            return;
+        }
+        case TestAwaitingDungeonRewards: {
+            uint8_t& dungeonItems = gSaveContext.inventory.dungeonItems[kAutomatedTestJabuDungeonIndex];
+            if (!automatedTestClient && !automatedTestDungeonMapChestTriggered) {
+                automatedTestDungeonMapChestTriggered = true;
+                gSaveContext.sceneFlags[SCENE_JABU_JABU].chest |= kAutomatedTestJabuMapChestMask;
+                CaptureCanonicalProgression();
+                if ((dungeonItems & kDungeonMapItemBit) == 0) {
+                    FailAutomatedTest("Jabu fixed-layout map chest did not restore the canonical map bit");
+                    return;
+                }
+                ++progressionRevision;
+                SendProgressionSnapshot();
+                ReportAutomatedTest("dungeon-rewards-map-reconciled",
+                                    "Jabu fixed-layout map chest restored canonical map ownership");
+                return;
+            }
+
+            if (automatedTestClient && !automatedTestDungeonCompassIntentTriggered) {
+                if ((dungeonItems & kDungeonMapItemBit) == 0) {
+                    return;
+                }
+                automatedTestDungeonCompassIntentTriggered = true;
+                automatedTestDungeonCompassIntentSnapshotRevision = lastAppliedProgressionRevision;
+                const uint16_t previousMapIndex = gSaveContext.mapIndex;
+                gSaveContext.mapIndex = kAutomatedTestJabuDungeonIndex;
+                Item_Give(gPlayState, ITEM_COMPASS);
+                gSaveContext.mapIndex = previousMapIndex;
+                if ((dungeonItems & kDungeonCompassItemBit) == 0) {
+                    FailAutomatedTest("guest Jabu compass Item_Give did not update its local dungeon item bit");
+                    return;
+                }
+                ReportAutomatedTest("dungeon-rewards-compass-intent-sent",
+                                    "guest Item_Give(ITEM_COMPASS) used mapIndex=Jabu");
+                return;
+            }
+
+            if ((dungeonItems & kAutomatedTestJabuRewardMask) != kAutomatedTestJabuRewardMask) {
+                return;
+            }
+            if (automatedTestClient &&
+                lastAppliedProgressionRevision <= automatedTestDungeonCompassIntentSnapshotRevision) {
+                return;
+            }
+            ReportAutomatedTest("dungeon-rewards-synchronized",
+                                "both Jabu map and compass bits converged through the host snapshot");
             SetAutomatedTestStage(TestAwaitingWorldState, "global-world-state-test-started");
             return;
         }
@@ -3896,6 +4732,25 @@ void Manager::UpdateAutomatedTest() {
             }
 
             Actor* actor = static_cast<Actor*>(local->second);
+            const uint64_t bystanderEntityId = kDynamicStalchildEntityPrefix | 2ULL;
+            auto bystander = actorSnapshots.find(bystanderEntityId);
+            if (!automatedTestClient && bystander == actorSnapshots.end()) {
+                Actor* spawned = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_SKB,
+                                             actor->world.pos.x + 30.0f, actor->world.pos.y, actor->world.pos.z,
+                                             actor->world.rot.x, actor->world.rot.y, actor->world.rot.z, actor->params);
+                if (spawned == nullptr) {
+                    FailAutomatedTest("could not spawn the Stalchild bystander used by the isolation proof");
+                    return;
+                }
+                SendStalchildSnapshot(spawned, true);
+                return;
+            }
+            bystander = actorSnapshots.find(bystanderEntityId);
+            const auto localBystander = localStalchildren.find(bystanderEntityId);
+            if (bystander == actorSnapshots.end() || !bystander->second.alive || bystander->second.health != 2 ||
+                !IsStalchildTargetable(bystander->second.stateId) || localBystander == localStalchildren.end()) {
+                return;
+            }
             if (!automatedTestClient) {
                 // Keep the host outside the retarget hysteresis while delayed guest pose packets settle. The combat
                 // proof specifically exercises a host-owned Stalchild attacking the guest.
@@ -3914,6 +4769,8 @@ void Manager::UpdateAutomatedTest() {
 
             automatedTestTargetEntityId = target->first;
             automatedTestTargetActor = local->second;
+            automatedTestStalchildBystanderEntityId = bystanderEntityId;
+            static_cast<Actor*>(local->second)->scale = { 0.016f, 0.016f, 0.016f };
             automatedTestLastObservedHealth = target->second.health;
             automatedTestCombatPhase = CombatSetup;
             automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
@@ -3927,9 +4784,13 @@ void Manager::UpdateAutomatedTest() {
             automatedTestFirstDamageObserved = false;
             automatedTestStalchildDawnTriggered = false;
             automatedTestStalchildTargetAgreementObserved = false;
+            automatedTestStalchildDeathTransitionObserved = false;
+            automatedTestStalchildDropObserved = false;
+            automatedTestStalchildBystanderObserved = false;
             automatedTestMissingTargetTick = 0;
             automatedTestNonTargetHealth = -1;
             ReportAutomatedTest("stalchild-host-identity-ready", std::to_string(target->first));
+            ReportAutomatedTest("stalchild-bystander-identity-ready", std::to_string(bystanderEntityId));
             SetAutomatedTestStage(TestStalchildCombat, "stalchild-combat-started");
             return;
         }
@@ -3941,6 +4802,18 @@ void Manager::UpdateAutomatedTest() {
             }
             Player* player = GET_PLAYER(gPlayState);
             const auto local = localStalchildren.find(target->first);
+            const auto bystander = actorSnapshots.find(automatedTestStalchildBystanderEntityId);
+            const auto localBystander = localStalchildren.find(automatedTestStalchildBystanderEntityId);
+            if (bystander == actorSnapshots.end() || !bystander->second.alive || bystander->second.health != 2 ||
+                localBystander == localStalchildren.end()) {
+                FailAutomatedTest("Stalchild bystander was damaged or removed: snapshot=" +
+                                  std::to_string(bystander != actorSnapshots.end()) + " alive=" +
+                                  std::to_string(bystander != actorSnapshots.end() && bystander->second.alive) +
+                                  " health=" +
+                                  std::to_string(bystander != actorSnapshots.end() ? bystander->second.health : -1) +
+                                  " local=" + std::to_string(localBystander != localStalchildren.end()));
+                return;
+            }
             if (target->second.alive && local == localStalchildren.end()) {
                 if (automatedTestMissingTargetTick == 0) {
                     automatedTestMissingTargetTick = automatedTestTick;
@@ -3950,6 +4823,21 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             automatedTestMissingTargetTick = 0;
+            if (automatedTestClient && target->second.alive && local != localStalchildren.end() &&
+                (automatedTestCombatPhase == CombatFirstSwing || automatedTestCombatPhase == CombatSecondSwing ||
+                 automatedTestCombatPhase == CombatAwaitFirstDamage)) {
+                Actor* targetActor = static_cast<Actor*>(local->second);
+                Actor* bystanderActor = static_cast<Actor*>(localBystander->second);
+                bystanderActor->world.pos = targetActor->world.pos;
+                bystanderActor->prevPos = bystanderActor->world.pos;
+            }
+            if (target->second.alive && target->second.health == 0 &&
+                target->second.adapterState[kStalchildAdapterBehavior] == 1 &&
+                !automatedTestStalchildDeathTransitionObserved) {
+                automatedTestStalchildDeathTransitionObserved = true;
+                ReportAutomatedTest("stalchild-native-death-visible",
+                                    "zero-health replica remained for the native dying animation");
+            }
             if (!automatedTestClient) {
                 const StalchildTarget selected = DecodeStalchildTarget(target->second.stateId);
                 if (selected == StalchildTarget::Guest && !automatedTestStalchildTargetAgreementObserved) {
@@ -3990,6 +4878,14 @@ void Manager::UpdateAutomatedTest() {
                 if (!combatObserved || !automatedTestFirstDamageObserved) {
                     return;
                 }
+                if (!automatedTestStalchildDeathTransitionObserved ||
+                    (!automatedTestClient && !automatedTestStalchildDropObserved)) {
+                    FailAutomatedTest("Stalchild terminal snapshot bypassed its native death or collectible path");
+                    return;
+                }
+                automatedTestStalchildBystanderObserved = true;
+                ReportAutomatedTest("stalchild-bystander-survived",
+                                    std::to_string(automatedTestStalchildBystanderEntityId));
                 ReportAutomatedTest("stalchild-dead-synchronized", std::to_string(target->first));
                 automatedTestTargetActor = nullptr;
                 SetAutomatedTestStage(TestAwaitingStalchildDawn, "stalchild-dawn-test-started");
@@ -4066,6 +4962,9 @@ void Manager::UpdateAutomatedTest() {
                 if (automatedTestCombatPhase == CombatAcquireTarget) {
                     player->invincibilityTimer = 2;
                     PositionAutomatedTestPlayer(player, actor, 55.0f);
+                    if (automatedTestTick - automatedTestCombatPhaseTick < 30) {
+                        return;
+                    }
                     if (player->focusActor != automatedTestTargetActor) {
                         return;
                     }

@@ -107,7 +107,7 @@ packets by 25 ms, and reversing each surviving packet pair. Both instances verif
 `PASS`. The harness is dormant unless `HYRULE_COOP_TEST_ROLE` is explicitly set.
 
 Verified host and client executables must have identical generated fingerprints and negotiate the explicit
-`hyrule-coop-poc.3` compatibility ID with protocol version 9 in addition to Shipwright's upstream commit. Release
+`hyrule-coop-poc.3` compatibility ID with protocol version 10 in addition to Shipwright's upstream commit. Release
 tooling records the exact executable and package hashes for each published build.
 The PoC build pins its own OneDrive directory for offline availability instead of rejecting the path by name. No
 installed Ship of Harkinian or 2Ship files are modified by this branch.

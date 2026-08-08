@@ -7,6 +7,7 @@
 #include "z_en_tp.h"
 #include "objects/object_tp/object_tp.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/JabuActorBridge.h"
 
 #define FLAGS 0
 
@@ -39,6 +40,75 @@ typedef enum {
     /* 8 */ TAILPASARAN_ACTION_HEAD_TAKEOFF,
     /* 9 */ TAILPASARAN_ACTION_HEAD_BURROWRETURNHOME
 } TailpasaranAction;
+
+static EnTp* EnTp_GetCoopHead(EnTp* this) {
+    EnTp* parent;
+
+    if (this == NULL) {
+        return NULL;
+    }
+    if (this->actor.params <= TAILPASARAN_HEAD) {
+        return this;
+    }
+    if (this->head != NULL) {
+        return this->head;
+    }
+    for (parent = this; parent->actor.parent != NULL; parent = (EnTp*)parent->actor.parent) {
+        if (parent->actor.params <= TAILPASARAN_HEAD) {
+            return parent;
+        }
+    }
+    return NULL;
+}
+
+void* HyruleCoop_EnTpCanonicalActor(void* actorRef) {
+    return EnTp_GetCoopHead(actorRef);
+}
+
+static uint8_t EnTp_GetCoopAction(const EnTp* this) {
+    switch (this->actionIndex) {
+        case TAILPASARAN_ACTION_FRAGMENT_FADE:
+            return HYRULE_COOP_TAILPASARAN_FRAGMENT_FADE;
+        case TAILPASARAN_ACTION_DIE:
+            return HYRULE_COOP_TAILPASARAN_DIE;
+        case TAILPASARAN_ACTION_TAIL_FOLLOWHEAD:
+            return HYRULE_COOP_TAILPASARAN_TAIL_FOLLOW;
+        case TAILPASARAN_ACTION_HEAD_WAIT:
+            return HYRULE_COOP_TAILPASARAN_HEAD_WAIT;
+        case TAILPASARAN_ACTION_HEAD_APPROACHPLAYER:
+            return HYRULE_COOP_TAILPASARAN_HEAD_APPROACH;
+        case TAILPASARAN_ACTION_HEAD_TAKEOFF:
+            return HYRULE_COOP_TAILPASARAN_HEAD_TAKEOFF;
+        case TAILPASARAN_ACTION_HEAD_BURROWRETURNHOME:
+            return HYRULE_COOP_TAILPASARAN_HEAD_BURROW;
+        default:
+            return UINT8_MAX;
+    }
+}
+
+static int EnTp_SetCoopHeadAction(EnTp* head, uint8_t action) {
+    switch (action) {
+        case HYRULE_COOP_TAILPASARAN_HEAD_WAIT:
+            EnTp_Head_SetupWait(head);
+            break;
+        case HYRULE_COOP_TAILPASARAN_HEAD_APPROACH:
+            EnTp_Head_SetupApproachPlayer(head);
+            break;
+        case HYRULE_COOP_TAILPASARAN_HEAD_TAKEOFF:
+            EnTp_Head_SetupTakeOff(head);
+            break;
+        case HYRULE_COOP_TAILPASARAN_HEAD_BURROW:
+            EnTp_Head_SetupBurrowReturnHome(head);
+            break;
+        case HYRULE_COOP_TAILPASARAN_DIE:
+            EnTp_SetupDie(head);
+            head->actor.params = TAILPASARAN_HEAD_DYING;
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
 
 const ActorInit En_Tp_InitVars = {
     ACTOR_EN_TP,
@@ -727,6 +797,102 @@ void EnTp_Update(Actor* thisx, PlayState* play) {
     if ((this->actionIndex >= TAILPASARAN_ACTION_TAIL_FOLLOWHEAD) && (this->actor.colChkInfo.health != 0)) {
         CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
     }
+}
+
+int HyruleCoop_EnTpCaptureState(const void* actorRef, HyruleCoopJabuActorState* state) {
+    EnTp* head = EnTp_GetCoopHead((EnTp*)actorRef);
+    uint8_t action;
+
+    if (head == NULL || state == NULL || head->actor.id != ACTOR_EN_TP) {
+        return 0;
+    }
+    action = EnTp_GetCoopAction(head);
+    if (action == UINT8_MAX) {
+        return 0;
+    }
+    state->action = action;
+    state->health = head->actor.colChkInfo.health;
+    state->flags = head->unk_150;
+    state->variant = head->actor.params;
+    state->timer = head->timer;
+    state->auxTimer = head->unk_15C;
+    state->auxState = head->damageEffect;
+    state->alpha = head->alpha;
+    state->animationFrame = head->heightPhase;
+    state->animationSpeed = head->horizontalVariation;
+    return 1;
+}
+
+int HyruleCoop_EnTpPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage) {
+    const EnTp* this = actorRef;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || this->actor.id != ACTOR_EN_TP ||
+        this->actionIndex < TAILPASARAN_ACTION_TAIL_FOLLOWHEAD || !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    return *damageEffect != TAILPASARAN_DMGEFF_NONE;
+}
+
+int HyruleCoop_EnTpApplyState(void* actorRef, void* playRef, const HyruleCoopJabuActorState* state) {
+    EnTp* head = EnTp_GetCoopHead(actorRef);
+
+    if (head == NULL || playRef == NULL || state == NULL || head->actor.id != ACTOR_EN_TP) {
+        return 0;
+    }
+    if ((EnTp_GetCoopAction(head) != state->action) && !EnTp_SetCoopHeadAction(head, state->action)) {
+        return 0;
+    }
+    head->actor.params = state->variant;
+    head->actor.colChkInfo.health = state->health;
+    head->unk_150 = state->flags;
+    head->timer = state->timer;
+    head->unk_15C = state->auxTimer;
+    head->damageEffect = state->auxState;
+    head->alpha = state->alpha;
+    head->heightPhase = state->animationFrame;
+    head->horizontalVariation = state->animationSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnTpApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage) {
+    EnTp* target = actorRef;
+    EnTp* head = EnTp_GetCoopHead(target);
+
+    if (target == NULL || head == NULL || playRef == NULL || target->actor.id != ACTOR_EN_TP ||
+        damageEffect == TAILPASARAN_DMGEFF_NONE) {
+        return 0;
+    }
+    if (target == head) {
+        target = (EnTp*)head->actor.child;
+    }
+    if (target == NULL || target->actor.params == TAILPASARAN_TAIL_DYING || target->actor.colChkInfo.health == 0) {
+        return 0;
+    }
+    target->actor.colChkInfo.damageEffect = damageEffect;
+    target->actor.colChkInfo.damage = damage;
+    target->collider.base.acFlags |= AC_HIT;
+    EnTp_UpdateDamage(target, playRef);
+    return 1;
+}
+
+int HyruleCoop_EnTpApplyDeath(void* actorRef, void* playRef) {
+    EnTp* target = actorRef;
+    EnTp* head = EnTp_GetCoopHead(target);
+
+    if (head == NULL || playRef == NULL || head->actor.id != ACTOR_EN_TP ||
+        head->actor.params == TAILPASARAN_HEAD_DYING) {
+        return 0;
+    }
+    if (target == head) {
+        target = (EnTp*)head->actor.child;
+    }
+    if (target == NULL) {
+        return 0;
+    }
+    return HyruleCoop_EnTpApplyDamage(target, playRef, TAILPASARAN_DMGEFF_INSULATING,
+                                      MAX(1, target->actor.colChkInfo.health));
 }
 
 void EnTp_Draw(Actor* thisx, PlayState* play) {

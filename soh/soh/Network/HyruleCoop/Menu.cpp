@@ -88,6 +88,20 @@ void DrawDirectCoopMenu(WidgetInfo&) {
         ImGui::Text("Queues: reliable %u  incoming %u  pending acknowledgements %u",
                     telemetry.reliableQueueDepth, telemetry.incomingQueueDepth,
                     telemetry.pendingAcknowledgements);
+        const double uploadKiB = static_cast<double>(telemetry.realtimeBytesSentPerSecond +
+                                                     telemetry.tcpBytesSentPerSecond) /
+                                 1024.0;
+        const double downloadKiB = static_cast<double>(telemetry.realtimeBytesReceivedPerSecond +
+                                                       telemetry.tcpBytesReceivedPerSecond) /
+                                   1024.0;
+        ImGui::Text("Traffic: up %.1f KiB/s  down %.1f KiB/s", uploadKiB, downloadKiB);
+        ImGui::TextDisabled("UDP: %llu/%llu B/s (%llu/%llu packets/s)  TCP: %llu/%llu B/s",
+                            static_cast<unsigned long long>(telemetry.realtimeBytesSentPerSecond),
+                            static_cast<unsigned long long>(telemetry.realtimeBytesReceivedPerSecond),
+                            static_cast<unsigned long long>(telemetry.realtimeDatagramsSentPerSecond),
+                            static_cast<unsigned long long>(telemetry.realtimeDatagramsReceivedPerSecond),
+                            static_cast<unsigned long long>(telemetry.tcpBytesSentPerSecond),
+                            static_cast<unsigned long long>(telemetry.tcpBytesReceivedPerSecond));
         ImGui::Text("Delays: reliable %u ms  apply %u ms", telemetry.lastTcpQueueDelayMs,
                     telemetry.lastApplicationDelayMs);
         ImGui::TextDisabled("Session peaks: reliable %u, incoming %u, send %u ms, apply %u ms",

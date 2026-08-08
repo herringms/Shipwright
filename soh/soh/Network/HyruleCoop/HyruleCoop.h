@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -84,7 +85,8 @@ class Manager {
     void SendSceneFlagsSnapshot(int16_t scene);
     void SendBarrierSnapshot();
     void SendBarrierReady();
-    void SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackKind);
+    void SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackKind, uint8_t damageEffect = 0,
+                          uint8_t damage = 1);
     void ClearPendingGuestAttack(uint64_t entityId);
     void SendCollectibleIntent(int16_t scene, int16_t flagType, int16_t flag);
     void SendProgressionSnapshot();
@@ -110,10 +112,19 @@ class Manager {
     void ApplyGohmaAuthority(void* actor, bool* shouldUpdate);
     void ForgetGohma(void* actor);
     void CompleteGohma(void* actor);
+    void SendJabuActorSnapshot(void* actor, bool alive);
+    void UpdateJabuActor(void* actor);
+    void ApplyJabuActorAuthority(void* actor, bool* shouldUpdate);
+    void ForgetJabuActor(void* actor);
+    void SendBarinadeSnapshot(void* actor, bool alive);
+    void UpdateBarinade(void* actor);
+    void ApplyBarinadeAuthority(void* actor, bool* shouldUpdate);
+    void ForgetBarinade(void* actor);
     void UpdateGenericEnemy(void* actor);
     void ApplyGenericEnemyAuthority(void* actor, bool* shouldUpdate);
     void ForgetGenericEnemy(void* actor);
     void UpdateGenericGuestAttack();
+    void UpdateTransportTelemetry();
     void InjectAutomatedTestInput(void* actor, bool* shouldUpdate);
     void RefreshRemotePlayer();
     void ReclaimRemotePlayerActor();
@@ -123,6 +134,8 @@ class Manager {
     bool IsBarrierTimelineReady(const BarrierState& state) const;
     void PopulateBarrierTimeline(BarrierState& state) const;
     void BeginReconnectBarrier();
+    void BeginCastleEscapeStoryBarrier();
+    void UpdateStoryEvent();
     void CompleteBarrierIfReady();
     void CaptureSaveOverlay();
     void RestoreSaveOverlay();
@@ -143,6 +156,14 @@ class Manager {
     bool IsSaveLoaded() const;
 
     DirectSession transport;
+    uint64_t transportTelemetrySampleAtMs = 0;
+    TransportTelemetry previousTransportTelemetry;
+    uint64_t realtimeBytesSentPerSecond = 0;
+    uint64_t realtimeBytesReceivedPerSecond = 0;
+    uint64_t tcpBytesSentPerSecond = 0;
+    uint64_t tcpBytesReceivedPerSecond = 0;
+    uint64_t realtimeDatagramsSentPerSecond = 0;
+    uint64_t realtimeDatagramsReceivedPerSecond = 0;
     ConnectionPhase phase = ConnectionPhase::Idle;
     std::string playerName;
     std::string remotePlayerName;
@@ -199,6 +220,8 @@ class Manager {
     std::unordered_map<uint64_t, void*> localDekuBabas;
     std::unordered_map<uint64_t, void*> localGohmas;
     std::unordered_map<uint64_t, void*> localGenericEnemies;
+    std::unordered_map<uint64_t, void*> localJabuActors;
+    std::unordered_map<uint64_t, void*> localBarinadeActors;
     std::unordered_map<uint64_t, void*> localStalchildren;
     std::unordered_map<uint64_t, StalchildTarget> stalchildTargets;
     std::unordered_map<uint64_t, uint16_t> stalchildAttackSequences;
@@ -209,6 +232,10 @@ class Manager {
     bool spawningReplicatedStalchild = false;
     std::unordered_map<uint64_t, ActorSnapshotMessage> actorSnapshots;
     std::unordered_set<uint64_t> genericGuestTargetsHitThisSwing;
+    std::optional<uint64_t> guestStalchildTargetThisSwing;
+    bool castleEscapeStoryPending = false;
+    bool castleEscapeStoryActive = false;
+    bool castleEscapeCutsceneObserved = false;
 
     bool automatedTestEnabled = false;
     bool automatedTestClient = false;
@@ -217,6 +244,8 @@ class Manager {
     bool automatedTestActorSpawned = false;
     bool automatedTestReconnectStarted = false;
     bool automatedTestProgressionTriggered = false;
+    bool automatedTestDungeonMapChestTriggered = false;
+    bool automatedTestDungeonCompassIntentTriggered = false;
     bool automatedTestWorldStateTriggered = false;
     bool automatedTestBossPrepared = false;
     bool automatedTestBossCompleted = false;
@@ -234,6 +263,9 @@ class Manager {
     bool automatedTestPostDeathCleanupObserved = false;
     bool automatedTestStalchildDawnTriggered = false;
     bool automatedTestStalchildTargetAgreementObserved = false;
+    bool automatedTestStalchildDeathTransitionObserved = false;
+    bool automatedTestStalchildDropObserved = false;
+    bool automatedTestStalchildBystanderObserved = false;
     bool automatedTestSaveRequested = false;
     std::atomic<bool> automatedTestSaveCompleted = false;
     uint8_t automatedTestCombatPhase = 0;
@@ -242,6 +274,8 @@ class Manager {
     uint32_t automatedTestAcceptedBossHits = 0;
     uint32_t automatedTestRecoveryStartedTick = 0;
     uint64_t automatedTestMissingTargetTick = 0;
+    uint64_t automatedTestStalchildBystanderEntityId = 0;
+    uint64_t automatedTestDungeonCompassIntentSnapshotRevision = 0;
     int16_t automatedTestLastObservedHealth = -1;
     int16_t automatedTestNonTargetHealth = -1;
     int16_t automatedTestHostReconnectRupees = 0;

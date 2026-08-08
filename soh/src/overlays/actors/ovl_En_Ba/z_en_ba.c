@@ -8,6 +8,7 @@
 #include "objects/object_bxa/object_bxa.h"
 #include "soh/frame_interpolation.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/JabuActorBridge.h"
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
@@ -448,18 +449,81 @@ void EnBa_Die(EnBa* this, PlayState* play) {
     }
 }
 
+static uint8_t EnBa_GetCoopAction(const EnBa* this) {
+    if (this->actionFunc == EnBa_Idle) return HYRULE_COOP_TENTACLE_IDLE;
+    if (this->actionFunc == EnBa_SwingAtPlayer) return HYRULE_COOP_TENTACLE_SWING;
+    if (this->actionFunc == EnBa_RecoilFromDamage) return HYRULE_COOP_TENTACLE_RECOIL;
+    if (this->actionFunc == EnBa_Die) return HYRULE_COOP_TENTACLE_DIE;
+    if (this->actionFunc == EnBa_FallAsBlob) return HYRULE_COOP_TENTACLE_BLOB;
+    return UINT8_MAX;
+}
+
+static int EnBa_SetCoopAction(EnBa* this, uint8_t action) {
+    switch (action) {
+        case HYRULE_COOP_TENTACLE_IDLE:
+            EnBa_SetupIdle(this);
+            break;
+        case HYRULE_COOP_TENTACLE_SWING:
+            EnBa_SetupSwingAtPlayer(this);
+            break;
+        case HYRULE_COOP_TENTACLE_RECOIL:
+            func_809B7174(this);
+            break;
+        case HYRULE_COOP_TENTACLE_DIE:
+            return 0;
+        case HYRULE_COOP_TENTACLE_BLOB:
+            EnBa_SetupFallAsBlob(this);
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
+
+static int EnBa_ApplyDamage(EnBa* this, PlayState* play, uint8_t damage) {
+    if (this == NULL || play == NULL || this->actor.params >= EN_BA_DEAD_BLOB || this->actor.colChkInfo.health == 0 ||
+        damage == 0) {
+        return 0;
+    }
+    if (damage >= this->actor.colChkInfo.health) {
+        this->actor.colChkInfo.health = 0;
+        func_809B75A0(this, play);
+        GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+    } else {
+        this->actor.colChkInfo.health -= damage;
+        func_809B7174(this);
+    }
+    return 1;
+}
+
+void* HyruleCoop_EnBaCanonicalActor(void* actorRef) {
+    EnBa* this = actorRef;
+
+    if (this == NULL || this->actor.id != ACTOR_EN_BA || this->actor.params >= EN_BA_DEAD_BLOB) {
+        return NULL;
+    }
+    return this;
+}
+
+int HyruleCoop_EnBaPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage) {
+    const EnBa* this = actorRef;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || this->actor.id != ACTOR_EN_BA ||
+        this->actor.params >= EN_BA_DEAD_BLOB || !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    // Vanilla appendages always take one damage for a valid collider hit.
+    *damage = 1;
+    return 1;
+}
+
 void EnBa_Update(Actor* thisx, PlayState* play) {
     EnBa* this = (EnBa*)thisx;
 
     if ((this->actor.params < EN_BA_DEAD_BLOB) && (this->collider.base.acFlags & 2)) {
         this->collider.base.acFlags &= ~2;
-        this->actor.colChkInfo.health--;
-        if (this->actor.colChkInfo.health == 0) {
-            func_809B75A0(this, play);
-            GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
-        } else {
-            func_809B7174(this);
-        }
+        EnBa_ApplyDamage(this, play, 1);
     }
     this->actionFunc(this, play);
     if (this->actor.params < EN_BA_DEAD_BLOB) {
@@ -468,6 +532,76 @@ void EnBa_Update(Actor* thisx, PlayState* play) {
     if (this->unk_14C >= 2) {
         CollisionCheck_SetAC(play, &play->colChkCtx, &this->collider.base);
     }
+}
+
+int HyruleCoop_EnBaCaptureState(const void* actorRef, HyruleCoopJabuActorState* state) {
+    const EnBa* this = actorRef;
+    uint8_t action;
+
+    if (this == NULL || state == NULL || this->actor.id != ACTOR_EN_BA) {
+        return 0;
+    }
+    action = EnBa_GetCoopAction(this);
+    if (action == UINT8_MAX) {
+        return 0;
+    }
+    state->action = action;
+    state->health = this->actor.colChkInfo.health;
+    state->flags = this->upperParams;
+    state->variant = this->actor.params;
+    state->timer = this->unk_318;
+    state->auxTimer = this->unk_31A;
+    state->auxState = this->unk_31C;
+    state->alpha = this->actor.colorFilterTimer;
+    state->animationFrame = this->unk_314;
+    state->animationSpeed = this->actor.speedXZ;
+    return 1;
+}
+
+int HyruleCoop_EnBaApplyState(void* actorRef, void* playRef, const HyruleCoopJabuActorState* state) {
+    EnBa* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || play == NULL || state == NULL || this->actor.id != ACTOR_EN_BA) {
+        return 0;
+    }
+    if (state->action == HYRULE_COOP_TENTACLE_DIE) {
+        if (this->actionFunc != EnBa_Die) {
+            if (!EnBa_ApplyDamage(this, play, MAX(1, this->actor.colChkInfo.health))) {
+                return 0;
+            }
+        }
+    } else if ((EnBa_GetCoopAction(this) != state->action) && !EnBa_SetCoopAction(this, state->action)) {
+        return 0;
+    }
+    this->actor.colChkInfo.health = state->health;
+    this->upperParams = state->flags;
+    this->actor.params = state->variant;
+    this->unk_318 = state->timer;
+    this->unk_31A = state->auxTimer;
+    this->unk_31C = state->auxState;
+    this->actor.colorFilterTimer = state->alpha;
+    this->unk_314 = state->animationFrame;
+    this->actor.speedXZ = state->animationSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnBaApplyDamage(void* actorRef, void* playRef, uint8_t damage) {
+    EnBa* this = actorRef;
+
+    if (this == NULL || this->actor.id != ACTOR_EN_BA) {
+        return 0;
+    }
+    return EnBa_ApplyDamage(this, playRef, damage);
+}
+
+int HyruleCoop_EnBaApplyDeath(void* actorRef, void* playRef) {
+    EnBa* this = actorRef;
+
+    if (this == NULL || this->actor.id != ACTOR_EN_BA) {
+        return 0;
+    }
+    return EnBa_ApplyDamage(this, playRef, MAX(1, this->actor.colChkInfo.health));
 }
 
 static void* D_809B8118[] = {

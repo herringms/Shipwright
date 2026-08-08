@@ -529,8 +529,16 @@ void EnSkb_Update(Actor* thisx, PlayState* play) {
 
 void EnSkb_ApplyCoopState(EnSkb* stalchild, u8 actionState, u8 attackActive, f32 animationFrame,
                           f32 animationSpeed, f32 shapeYOffset, f32 shadowScale) {
-    if (stalchild->actionState != actionState) {
+    u8 stateChanged = stalchild->actionState != actionState;
+
+    if (stateChanged) {
         switch (actionState) {
+            case 1:
+                // The host owns defeat callbacks, drops, and actor lifetime. The guest only needs the matching
+                // presentation while it waits for the terminal host snapshot.
+                Animation_MorphToPlayOnce(&stalchild->skelAnime, &gStalchildDyingAnim, -4.0f);
+                stalchild->setColliderAT = 0;
+                break;
             case 2:
                 func_80AFD644(stalchild);
                 break;
@@ -552,10 +560,41 @@ void EnSkb_ApplyCoopState(EnSkb* stalchild, u8 actionState, u8 attackActive, f32
     }
     stalchild->actionState = actionState;
     stalchild->setColliderAT = attackActive;
-    stalchild->skelAnime.curFrame = animationFrame;
+    if (stateChanged) {
+        stalchild->skelAnime.curFrame = animationFrame;
+    }
     stalchild->skelAnime.playSpeed = animationSpeed;
     stalchild->actor.shape.yOffset = shapeYOffset;
     stalchild->actor.shape.shadowScale = shadowScale;
+}
+
+u8 EnSkb_ApplyCoopDamage(EnSkb* stalchild, PlayState* play, u8 damage) {
+    if (stalchild == NULL || play == NULL || damage == 0 || stalchild->actor.colChkInfo.health == 0 ||
+        stalchild->actionState == 1) {
+        return 0;
+    }
+
+    // Re-enter the native hurt/death state machine after the host validates a guest sword contact. An immediate
+    // Actor_Kill skips the dying animation, body-break completion, enemy-defeat callback, and collectible drop.
+    stalchild->actor.colChkInfo.damage = damage;
+    stalchild->actor.colChkInfo.damageEffect = 0xE;
+    stalchild->lastDamageReaction = 0xE;
+    stalchild->setColliderAT = 0;
+    stalchild->actor.dropFlag = 0;
+    Actor_SetColorFilter(&stalchild->actor, 0x4000, 0xFF, 0, 8);
+    if (Actor_ApplyDamage(&stalchild->actor) == 0) {
+        func_80AFD7B4(stalchild, play);
+        return 0;
+    }
+
+    func_80AFD644(stalchild);
+    return stalchild->actor.colChkInfo.health;
+}
+
+void EnSkb_AdvanceCoopAnimation(EnSkb* stalchild) {
+    if (stalchild != NULL) {
+        SkelAnime_Update(&stalchild->skelAnime);
+    }
 }
 
 void EnSkb_RegisterCoopCollisions(EnSkb* stalchild, PlayState* play, u8 attackActive) {

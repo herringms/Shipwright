@@ -7,6 +7,7 @@
 #include "z_en_vali.h"
 #include "objects/object_vali/object_vali.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/JabuActorBridge.h"
 #include <stdlib.h>
 #include "soh/ResourceManagerHelpers.h"
 
@@ -20,6 +21,15 @@ void EnVali_Draw(Actor* thisx, PlayState* play);
 
 void EnVali_SetupLurk(EnVali* this);
 void EnVali_SetupDropAppear(EnVali* this);
+void EnVali_SetupFloatIdle(EnVali* this);
+void EnVali_SetupAttacked(EnVali* this);
+void EnVali_SetupRetaliate(EnVali* this);
+void EnVali_SetupMoveArmsDown(EnVali* this);
+void EnVali_SetupBurnt(EnVali* this);
+void EnVali_SetupDivideAndDie(EnVali* this, PlayState* play);
+void EnVali_SetupStunned(EnVali* this);
+void EnVali_SetupFrozen(EnVali* this);
+void EnVali_SetupReturnToLurk(EnVali* this);
 
 void EnVali_Lurk(EnVali* this, PlayState* play);
 void EnVali_DropAppear(EnVali* this, PlayState* play);
@@ -32,6 +42,66 @@ void EnVali_DivideAndDie(EnVali* this, PlayState* play);
 void EnVali_Stunned(EnVali* this, PlayState* play);
 void EnVali_Frozen(EnVali* this, PlayState* play);
 void EnVali_ReturnToLurk(EnVali* this, PlayState* play);
+
+static uint8_t EnVali_GetCoopAction(const EnVali* this) {
+    if (this->actionFunc == EnVali_Lurk) return HYRULE_COOP_BARI_LURK;
+    if (this->actionFunc == EnVali_DropAppear) return HYRULE_COOP_BARI_DROP_APPEAR;
+    if (this->actionFunc == EnVali_FloatIdle) return HYRULE_COOP_BARI_FLOAT_IDLE;
+    if (this->actionFunc == EnVali_Attacked) return HYRULE_COOP_BARI_ATTACKED;
+    if (this->actionFunc == EnVali_Retaliate) return HYRULE_COOP_BARI_RETALIATE;
+    if (this->actionFunc == EnVali_MoveArmsDown) return HYRULE_COOP_BARI_MOVE_ARMS_DOWN;
+    if (this->actionFunc == EnVali_Burnt) return HYRULE_COOP_BARI_BURNT;
+    if (this->actionFunc == EnVali_DivideAndDie) return HYRULE_COOP_BARI_DIVIDE_AND_DIE;
+    if (this->actionFunc == EnVali_Stunned) return HYRULE_COOP_BARI_STUNNED;
+    if (this->actionFunc == EnVali_Frozen) return HYRULE_COOP_BARI_FROZEN;
+    if (this->actionFunc == EnVali_ReturnToLurk) return HYRULE_COOP_BARI_RETURN_TO_LURK;
+    return UINT8_MAX;
+}
+
+static int EnVali_SetCoopAction(EnVali* this, PlayState* play, uint8_t action) {
+    switch (action) {
+        case HYRULE_COOP_BARI_LURK:
+            EnVali_SetupLurk(this);
+            break;
+        case HYRULE_COOP_BARI_DROP_APPEAR:
+            EnVali_SetupDropAppear(this);
+            break;
+        case HYRULE_COOP_BARI_FLOAT_IDLE:
+            EnVali_SetupFloatIdle(this);
+            break;
+        case HYRULE_COOP_BARI_ATTACKED:
+            EnVali_SetupAttacked(this);
+            break;
+        case HYRULE_COOP_BARI_RETALIATE:
+            EnVali_SetupRetaliate(this);
+            break;
+        case HYRULE_COOP_BARI_MOVE_ARMS_DOWN:
+            EnVali_SetupMoveArmsDown(this);
+            break;
+        case HYRULE_COOP_BARI_BURNT:
+            EnVali_SetupBurnt(this);
+            break;
+        case HYRULE_COOP_BARI_DIVIDE_AND_DIE:
+            // Run this once on each peer so the three child Biri exist locally. Subsequent snapshots preserve the
+            // authoritative timer and cannot duplicate the children because action setup is transition-only. The
+            // native spawn loop advances the parent's yaw by 0xffff, so restore that one unit before replaying it.
+            this->actor.world.rot.y++;
+            EnVali_SetupDivideAndDie(this, play);
+            break;
+        case HYRULE_COOP_BARI_STUNNED:
+            EnVali_SetupStunned(this);
+            break;
+        case HYRULE_COOP_BARI_FROZEN:
+            EnVali_SetupFrozen(this);
+            break;
+        case HYRULE_COOP_BARI_RETURN_TO_LURK:
+            EnVali_SetupReturnToLurk(this);
+            break;
+        default:
+            return 0;
+    }
+    return 1;
+}
 
 const ActorInit En_Vali_InitVars = {
     ACTOR_EN_VALI,
@@ -576,6 +646,89 @@ void EnVali_Update(Actor* thisx, PlayState* play) {
         CollisionCheck_SetOC(play, &play->colChkCtx, &this->bodyCollider.base);
         Actor_SetFocus(&this->actor, 0.0f);
     }
+}
+
+int HyruleCoop_EnValiCaptureState(const void* actorRef, HyruleCoopJabuActorState* state) {
+    const EnVali* this = actorRef;
+    uint8_t action;
+
+    if (this == NULL || state == NULL || this->actor.id != ACTOR_EN_VALI) {
+        return 0;
+    }
+    action = EnVali_GetCoopAction(this);
+    if (action == UINT8_MAX) {
+        return 0;
+    }
+    state->action = action;
+    state->health = this->actor.colChkInfo.health;
+    state->flags = this->actor.draw != NULL;
+    state->variant = this->actor.params;
+    state->timer = this->timer;
+    state->auxTimer = this->lightningTimer;
+    state->auxState = this->slingshotReactionTimer;
+    state->alpha = this->actor.shape.shadowAlpha;
+    state->animationFrame = this->skelAnime.curFrame;
+    state->animationSpeed = this->skelAnime.playSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnValiPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage) {
+    const EnVali* this = actorRef;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || this->actor.id != ACTOR_EN_VALI ||
+        !(this->bodyCollider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    return *damageEffect != BARI_DMGEFF_NONE || *damage != 0;
+}
+
+int HyruleCoop_EnValiApplyState(void* actorRef, void* playRef, const HyruleCoopJabuActorState* state) {
+    EnVali* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || play == NULL || state == NULL || this->actor.id != ACTOR_EN_VALI) {
+        return 0;
+    }
+    if ((EnVali_GetCoopAction(this) != state->action) && !EnVali_SetCoopAction(this, play, state->action)) {
+        return 0;
+    }
+    this->actor.colChkInfo.health = state->health;
+    this->actor.params = state->variant;
+    this->timer = state->timer;
+    this->lightningTimer = state->auxTimer;
+    this->slingshotReactionTimer = state->auxState;
+    this->actor.shape.shadowAlpha = state->alpha;
+    this->skelAnime.curFrame = state->animationFrame;
+    this->skelAnime.playSpeed = state->animationSpeed;
+    return 1;
+}
+
+int HyruleCoop_EnValiApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage) {
+    EnVali* this = actorRef;
+
+    if (this == NULL || playRef == NULL || this->actor.id != ACTOR_EN_VALI ||
+        (damageEffect == BARI_DMGEFF_NONE && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->bodyCollider.base.acFlags |= AC_HIT;
+    EnVali_UpdateDamage(this, playRef);
+    return 1;
+}
+
+int HyruleCoop_EnValiApplyDeath(void* actorRef, void* playRef) {
+    EnVali* this = actorRef;
+
+    if (this == NULL || playRef == NULL || this->actor.id != ACTOR_EN_VALI ||
+        this->actionFunc == EnVali_DivideAndDie) {
+        return 0;
+    }
+    this->actor.colChkInfo.health = 0;
+    EnVali_SetupDivideAndDie(this, playRef);
+    return 1;
 }
 
 // Draw and associated functions
