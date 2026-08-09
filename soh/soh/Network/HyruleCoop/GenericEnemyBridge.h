@@ -41,6 +41,34 @@ int HyruleCoop_EnSshPeekDamage(const void* actor, uint8_t* damageEffect, uint8_t
 int HyruleCoop_EnSshConsumeDamage(void* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags);
 int HyruleCoop_EnSshApplyDamage(void* actor, void* play, uint8_t damageEffect, uint8_t damage, uint32_t damageFlags);
 
+int HyruleCoop_EnPohPeekDamage(const void* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags);
+int HyruleCoop_EnPohConsumeDamage(void* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags);
+int HyruleCoop_EnPohApplyDamage(void* actor, void* play, uint8_t damageEffect, uint8_t damage, uint32_t damageFlags);
+
+int HyruleCoop_EnPoSistersSupportsSharedCombat(const void* actor);
+int HyruleCoop_EnPoSistersPeekDamage(const void* actor, uint8_t* damageEffect, uint8_t* damage,
+                                     uint32_t* damageFlags);
+int HyruleCoop_EnPoSistersConsumeDamage(void* actor, uint8_t* damageEffect, uint8_t* damage,
+                                        uint32_t* damageFlags);
+int HyruleCoop_EnPoSistersApplyDamage(void* actor, void* play, uint8_t damageEffect, uint8_t damage,
+                                      uint32_t damageFlags);
+
+int HyruleCoop_EnWfPeekDamage(const void* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags);
+int HyruleCoop_EnWfConsumeDamage(void* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags);
+int HyruleCoop_EnWfApplyDamage(void* actor, void* play, uint8_t damageEffect, uint8_t damage, uint32_t damageFlags);
+int HyruleCoop_EnWfReplayDamage(void* actor, void* play, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags);
+
+int HyruleCoop_BossGanondrofSupportsSharedCombat(const void* actor);
+int HyruleCoop_BossGanondrofPeekDamage(const void* actor, uint8_t* damageEffect, uint8_t* damage,
+                                       uint32_t* damageFlags);
+int HyruleCoop_BossGanondrofConsumeDamage(void* actor, uint8_t* damageEffect, uint8_t* damage,
+                                          uint32_t* damageFlags);
+int HyruleCoop_BossGanondrofApplyDamage(void* actor, void* play, uint8_t damageEffect, uint8_t damage,
+                                        uint32_t damageFlags);
+int HyruleCoop_BossGanondrofReplayDamage(void* actor, void* play, uint8_t damageEffect, uint8_t damage,
+                                         uint32_t damageFlags);
+
 /* Guest replicas retain death effects but must not generate an independent drop. */
 int HyruleCoop_ShouldSuppressSharedEnemyLocalReward(void* actor);
 

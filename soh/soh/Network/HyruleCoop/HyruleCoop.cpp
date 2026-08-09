@@ -759,9 +759,22 @@ static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_TEST)->family == SharedEne
 static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_SW)->family == SharedEnemyAdapterFamily::GoldSkulltula);
 static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_ST)->family == SharedEnemyAdapterFamily::Skulltula);
 static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_SSH)->family == SharedEnemyAdapterFamily::SkulltulaFather);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_POH)->family == SharedEnemyAdapterFamily::Poe);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_PO_SISTERS)->family == SharedEnemyAdapterFamily::PoeSister);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_WF)->family == SharedEnemyAdapterFamily::Wolfos);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_BOSS_GANONDROF)->family == SharedEnemyAdapterFamily::PhantomGanon);
 
 bool IsSharedCombatEnemyActor(const Actor* actor) {
-    return actor != nullptr && IsSharedCombatEnemyActorId(actor->id);
+    if (actor == nullptr || !IsSharedCombatEnemyActorId(actor->id)) {
+        return false;
+    }
+    if (actor->id == ACTOR_EN_PO_SISTERS) {
+        return HyruleCoop_EnPoSistersSupportsSharedCombat(actor) != 0;
+    }
+    if (actor->id == ACTOR_BOSS_GANONDROF) {
+        return HyruleCoop_BossGanondrofSupportsSharedCombat(actor) != 0;
+    }
+    return true;
 }
 
 bool PeekSharedCombatEnemyDamage(const Actor* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
@@ -783,6 +796,14 @@ bool PeekSharedCombatEnemyDamage(const Actor* actor, uint8_t* damageEffect, uint
             return HyruleCoop_EnStPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
         case ACTOR_EN_SSH:
             return HyruleCoop_EnSshPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_POH:
+            return HyruleCoop_EnPohPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_PO_SISTERS:
+            return HyruleCoop_EnPoSistersPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_WF:
+            return HyruleCoop_EnWfPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_BOSS_GANONDROF:
+            return HyruleCoop_BossGanondrofPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
         default:
             return false;
     }
@@ -807,12 +828,21 @@ bool ConsumeSharedCombatEnemyDamage(Actor* actor, uint8_t* damageEffect, uint8_t
             return HyruleCoop_EnStConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
         case ACTOR_EN_SSH:
             return HyruleCoop_EnSshConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_POH:
+            return HyruleCoop_EnPohConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_PO_SISTERS:
+            return HyruleCoop_EnPoSistersConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_WF:
+            return HyruleCoop_EnWfConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_BOSS_GANONDROF:
+            return HyruleCoop_BossGanondrofConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
         default:
             return false;
     }
 }
 
-bool ApplySharedCombatEnemyDamage(Actor* actor, uint8_t damageEffect, uint8_t damage, uint32_t damageFlags) {
+bool ApplySharedCombatEnemyDamage(Actor* actor, uint8_t damageEffect, uint8_t damage, uint32_t damageFlags,
+                                  bool authoritativeReplay = false) {
     if (actor == nullptr || gPlayState == nullptr) {
         return false;
     }
@@ -831,6 +861,20 @@ bool ApplySharedCombatEnemyDamage(Actor* actor, uint8_t damageEffect, uint8_t da
             return HyruleCoop_EnStApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
         case ACTOR_EN_SSH:
             return HyruleCoop_EnSshApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_POH:
+            return HyruleCoop_EnPohApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_PO_SISTERS:
+            return HyruleCoop_EnPoSistersApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_WF:
+            return (authoritativeReplay ? HyruleCoop_EnWfReplayDamage(actor, gPlayState, damageEffect, damage,
+                                                                      damageFlags)
+                                        : HyruleCoop_EnWfApplyDamage(actor, gPlayState, damageEffect, damage,
+                                                                     damageFlags)) != 0;
+        case ACTOR_BOSS_GANONDROF:
+            return (authoritativeReplay ? HyruleCoop_BossGanondrofReplayDamage(actor, gPlayState, damageEffect,
+                                                                                damage, damageFlags)
+                                        : HyruleCoop_BossGanondrofApplyDamage(actor, gPlayState, damageEffect,
+                                                                               damage, damageFlags)) != 0;
         default:
             return false;
     }
@@ -4010,7 +4054,7 @@ void Manager::ApplySharedCombatEnemyAuthority(void* actorRef, bool* shouldUpdate
     uint32_t damageFlags = 0;
     if (DecodeSharedCombatEnemyOutcome(snapshot->second, &outcomeSequence, &damageEffect, &damage, &damageFlags) &&
         IsNewSharedCombatEnemyOutcome(appliedSharedCombatEnemyOutcomeSequences[entityId], outcomeSequence)) {
-        if (ApplySharedCombatEnemyDamage(actor, damageEffect, damage, damageFlags)) {
+        if (ApplySharedCombatEnemyDamage(actor, damageEffect, damage, damageFlags, true)) {
             appliedSharedCombatEnemyOutcomeSequences[entityId] = outcomeSequence;
         }
     }

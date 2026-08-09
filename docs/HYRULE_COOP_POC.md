@@ -121,9 +121,12 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
   they share the same upstream Git commit
 - Authenticated pairing, encryption, NAT traversal, and invite services
 - Generic synchronization for every actor, puzzle, cutscene, and boss beyond the specialized Deku Baba, Stalchild,
-  Gohma, ReDead/Gibdo, Moblin, Blue Bubble, Stalfos, Skulltula, Gold Skulltula, and Skulltula Father adapters plus the
-  explicitly allowlisted Keese baseline. The newer enemy adapters share authoritative damage, death, and rewards;
-  their local movement and target selection are not yet host-owned.
+  Gohma, ReDead/Gibdo, Moblin, Blue Bubble, Stalfos, Skulltula, Gold Skulltula, Skulltula Father, Poe, real Poe Sister,
+  Wolfos, and Phantom Ganon adapters plus the explicitly allowlisted Keese baseline. Poe Sister decoys and Phantom
+  Ganon painting fakes remain local by design so clones cannot collide with the real actor's shared identity.
+  Floormasters/Wallmasters remain locally simulated; their durable room-clear, switch, and chest flags use the shared
+  scene-state path. The newer enemy adapters share authoritative damage, death, and rewards; their local movement and
+  target selection are not yet host-owned.
 - Carried world actors and their player attachments, including canonical shared pots and participant-local traversal
   Cuccos whose remote carry proxies do not replace either player's interactive Cucco
 - Complete Deku Baba hit reactions, temporary pruning, drops, and regrowth beyond the synthetic permanent-death proof

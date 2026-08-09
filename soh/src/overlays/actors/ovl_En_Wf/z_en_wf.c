@@ -9,6 +9,7 @@
 #include "overlays/actors/ovl_En_Encount1/z_en_encount1.h"
 #include "objects/object_wf/object_wf.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 
 #define FLAGS (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED)
 
@@ -1201,7 +1202,9 @@ void EnWf_SetupDie(EnWf* this) {
     this->actionTimer = this->skelAnime.animLength;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_WOLFOS_DEAD);
     EnWf_SetupAction(this, EnWf_Die);
-    GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+    if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+        GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+    }
 }
 
 void EnWf_Die(EnWf* this, PlayState* play) {
@@ -1215,7 +1218,9 @@ void EnWf_Die(EnWf* this, PlayState* play) {
     }
 
     if (SkelAnime_Update(&this->skelAnime)) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        }
 
         if (this->switchFlag != 0xFF) {
             Flags_SetSwitch(play, this->switchFlag);
@@ -1300,6 +1305,105 @@ void EnWf_UpdateDamage(EnWf* this, PlayState* play) {
             }
         }
     }
+}
+
+static int EnWf_GetCoopDamage(const EnWf* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    const ColliderCylinder* hitCollider;
+    s16 yawDiff;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        (this->colliderSpheres.base.acFlags & AC_BOUNCED) ||
+        (!(this->colliderCylinderBody.base.acFlags & AC_HIT) &&
+         !(this->colliderCylinderTail.base.acFlags & AC_HIT)) ||
+        this->action < WOLFOS_ACTION_WAIT) {
+        return 0;
+    }
+
+    hitCollider = (this->colliderCylinderBody.base.acFlags & AC_HIT) ? &this->colliderCylinderBody
+                                                                     : &this->colliderCylinderTail;
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = hitCollider->info.acHitInfo != NULL ? hitCollider->info.acHitInfo->toucher.dmgFlags : 0;
+
+    // Vanilla intentionally consumes ice-magic contact without applying damage or a reaction.
+    if (*damageEffect == ENWF_DMGEFF_ICE_MAGIC) {
+        return 0;
+    }
+
+    yawDiff = this->actor.yawTowardsPlayer - this->actor.shape.rot.y;
+    if ((!(this->colliderCylinderBody.base.acFlags & AC_HIT) &&
+         (this->colliderCylinderTail.base.acFlags & AC_HIT)) ||
+        ABS(yawDiff) > 19000) {
+        *damage = (uint8_t)CLAMP_MAX((s32)*damage * 4, UINT8_MAX);
+    }
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnWfPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnWf_GetCoopDamage((const EnWf*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnWfConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnWf* this = (EnWf*)actorRef;
+    if (!EnWf_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->colliderCylinderBody.base.acFlags &= ~AC_HIT;
+    this->colliderCylinderTail.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+static int EnWf_ApplyCoopDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags, int authoritativeReplay) {
+    EnWf* this = (EnWf*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    ColliderInfo syntheticAttacker = { 0 };
+    ColliderInfo* previousHitInfo;
+    s16 previousShapeRotation;
+
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 ||
+        (damageEffect == 0 && damage == 0) || damageEffect == ENWF_DMGEFF_ICE_MAGIC) {
+        return 0;
+    }
+
+    // Wolfos movement remains locally simulated. If an accepted remote hit arrives while this copy is still
+    // emerging or playing its prior damage reaction, advance it to an attackable native state instead of dropping
+    // the hit solely because the two action timers differ.
+    if (this->action < WOLFOS_ACTION_WAIT && !authoritativeReplay) {
+        return 0;
+    }
+    if (this->action < WOLFOS_ACTION_WAIT) {
+        this->actor.scale.y = this->actor.scale.x;
+        this->actor.gravity = -2.0f;
+        this->actor.flags |= ACTOR_FLAG_ATTENTION_ENABLED;
+        EnWf_SetupWait(this);
+    }
+
+    syntheticAttacker.toucher.dmgFlags = damageFlags;
+    syntheticAttacker.toucher.damage = damage;
+    previousHitInfo = this->colliderCylinderBody.info.acHitInfo;
+    previousShapeRotation = this->actor.shape.rot.y;
+    this->colliderCylinderBody.info.acHitInfo = &syntheticAttacker;
+    this->actor.shape.rot.y = this->actor.yawTowardsPlayer;
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->colliderSpheres.base.acFlags &= ~AC_BOUNCED;
+    this->colliderCylinderTail.base.acFlags &= ~AC_HIT;
+    this->colliderCylinderBody.base.acFlags |= AC_HIT;
+    EnWf_UpdateDamage(this, play);
+    this->actor.shape.rot.y = previousShapeRotation;
+    this->colliderCylinderBody.info.acHitInfo = previousHitInfo;
+    return 1;
+}
+
+int HyruleCoop_EnWfApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                               uint32_t damageFlags) {
+    return EnWf_ApplyCoopDamage(actorRef, playRef, damageEffect, damage, damageFlags, 0);
+}
+
+int HyruleCoop_EnWfReplayDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags) {
+    return EnWf_ApplyCoopDamage(actorRef, playRef, damageEffect, damage, damageFlags, 1);
 }
 
 void EnWf_Update(Actor* thisx, PlayState* play) {

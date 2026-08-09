@@ -345,6 +345,15 @@ static void TestSharedEnemyAdapterContracts() {
     constexpr uint8_t kSharedCombatAttackKind = 6;
     uint64_t priorEntityId = 0;
 
+    assert(FindSharedEnemyAdapterContract(0x000D)->family == SharedEnemyAdapterFamily::Poe);
+    assert(FindSharedEnemyAdapterContract(0x0091)->family == SharedEnemyAdapterFamily::PoeSister);
+    assert(FindSharedEnemyAdapterContract(0x01AF)->family == SharedEnemyAdapterFamily::Wolfos);
+    assert(FindSharedEnemyAdapterContract(0x0052)->family == SharedEnemyAdapterFamily::PhantomGanon);
+    // Wallmasters and Floormasters remain participant-local encounters. Their room-clear, switch, and chest
+    // consequences travel through SceneFlagsSnapshot instead of assigning a shared combat identity to each hand.
+    assert(FindSharedEnemyAdapterContract(0x0011) == nullptr);
+    assert(FindSharedEnemyAdapterContract(0x008E) == nullptr);
+
     for (size_t index = 0; index < kSharedEnemyAdapterContracts.size(); ++index) {
         const SharedEnemyAdapterContract& contract = kSharedEnemyAdapterContracts[index];
         const SharedEnemyAdapterContract* found = FindSharedEnemyAdapterContract(contract.actorId);
@@ -361,15 +370,8 @@ static void TestSharedEnemyAdapterContracts() {
         assert(!ShouldApplySharedEnemyHostOutcome(sequence, sequence - 1));
         assert(ShouldApplySharedEnemyHostOutcome(sequence, sequence + 1));
 
-        if (contract.nativeOutcome == SharedEnemyNativeOutcome::Death) {
-            assert(ShouldSuppressGuestSharedEnemyDrop(found, true));
-            assert(ShouldSuppressGuestSharedEnemyDefeatHook(found, true));
-        } else {
-            // Skulltula Father is natively stunned, not killed, so it has no
-            // duplicate death reward to suppress.
-            assert(!ShouldSuppressGuestSharedEnemyDrop(found, true));
-            assert(!ShouldSuppressGuestSharedEnemyDefeatHook(found, true));
-        }
+        assert(ShouldSuppressGuestSharedEnemyDrop(found, true) == contract.suppressGuestDrop);
+        assert(ShouldSuppressGuestSharedEnemyDefeatHook(found, true) == contract.suppressGuestDefeatHook);
         assert(!ShouldSuppressGuestSharedEnemyDrop(found, false));
         assert(!ShouldSuppressGuestSharedEnemyDefeatHook(found, false));
 

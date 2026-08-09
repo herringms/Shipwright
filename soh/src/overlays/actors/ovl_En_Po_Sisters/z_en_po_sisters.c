@@ -9,6 +9,7 @@
 #include "objects/object_po_sisters/object_po_sisters.h"
 #include "soh/frame_interpolation.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -307,7 +308,7 @@ void func_80AD9568(EnPoSisters* this) {
 
 void func_80AD95D8(EnPoSisters* this) {
     Animation_MorphToPlayOnce(&this->skelAnime, &gPoeSistersDamagedAnim, -3.0f);
-    if (this->collider.base.ac != NULL) {
+    if (this->collider.base.ac != NULL && this->collider.info.acHitInfo != NULL) {
         this->actor.world.rot.y = (this->collider.info.acHitInfo->toucher.dmgFlags & 0x1F824)
                                       ? this->collider.base.ac->world.rot.y
                                       : Actor_WorldYawTowardActor(&this->actor, this->collider.base.ac) + 0x8000;
@@ -392,7 +393,9 @@ void func_80AD99D4(EnPoSisters* this, PlayState* play) {
 void func_80AD9A54(EnPoSisters* this, PlayState* play) {
     this->unk_19A = 0;
     this->actor.world.pos.y = this->unk_234[0].y;
-    Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x80);
+    if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x80);
+    }
     this->actionFunc = func_80ADB17C;
 }
 
@@ -1171,7 +1174,9 @@ void func_80ADC10C(EnPoSisters* this, PlayState* play) {
             } else {
                 Enemy_StartFinishingBlow(play, &this->actor);
                 Audio_PlayActorSound2(&this->actor, NA_SE_EN_PO_SISTER_DEAD);
-                GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+                if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                    GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+                }
             }
             func_80AD95D8(this);
         }
@@ -1236,6 +1241,54 @@ void EnPoSisters_Update(Actor* thisx, PlayState* play) {
             this->actor.shape.rot.y = this->actor.world.rot.y;
         }
     }
+}
+
+int HyruleCoop_EnPoSistersSupportsSharedCombat(const void* actorRef) {
+    const EnPoSisters* this = (const EnPoSisters*)actorRef;
+    return this != NULL && this->unk_195 == 0;
+}
+
+static int EnPoSisters_GetCoopDamage(const EnPoSisters* this, uint8_t* damageEffect, uint8_t* damage,
+                                     uint32_t* damageFlags) {
+    if (!HyruleCoop_EnPoSistersSupportsSharedCombat(this) || damageEffect == NULL || damage == NULL ||
+        damageFlags == NULL || !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = this->collider.info.acHitInfo != NULL ? this->collider.info.acHitInfo->toucher.dmgFlags : 0;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnPoSistersPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage,
+                                     uint32_t* damageFlags) {
+    return EnPoSisters_GetCoopDamage((const EnPoSisters*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnPoSistersConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage,
+                                        uint32_t* damageFlags) {
+    EnPoSisters* this = (EnPoSisters*)actorRef;
+    if (!EnPoSisters_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->collider.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnPoSistersApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                      uint32_t damageFlags) {
+    EnPoSisters* this = (EnPoSisters*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (!HyruleCoop_EnPoSistersSupportsSharedCombat(this) || play == NULL || this->actor.colChkInfo.health == 0 ||
+        (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->collider.base.acFlags |= AC_HIT;
+    func_80ADC10C(this, play);
+    return 1;
 }
 
 void func_80ADC55C(EnPoSisters* this) {

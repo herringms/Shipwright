@@ -13,6 +13,7 @@
 #include "overlays/actors/ovl_Door_Warp1/z_door_warp1.h"
 #include "soh/OTRGlobals.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -1226,7 +1227,9 @@ void BossGanondrof_CollisionCheck(BossGanondrof* this, PlayState* play) {
                         if ((s8)this->actor.colChkInfo.health <= 0) {
                             BossGanondrof_SetupDeath(this, play);
                             Enemy_StartFinishingBlow(play, &this->actor);
-                            GameInteractor_ExecuteOnBossDefeat(&this->actor);
+                            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                                GameInteractor_ExecuteOnBossDefeat(&this->actor);
+                            }
                             return;
                         }
                     }
@@ -1249,6 +1252,160 @@ void BossGanondrof_CollisionCheck(BossGanondrof* this, PlayState* play) {
             this->returnCount = 0;
         }
     }
+}
+
+#define HYRULE_COOP_PHANTOM_GANON_PAINTING_HIT 0xFD
+#define HYRULE_COOP_PHANTOM_GANON_RETURN_HIT 0xFE
+
+int HyruleCoop_BossGanondrofSupportsSharedCombat(const void* actorRef) {
+    const BossGanondrof* this = (const BossGanondrof*)actorRef;
+    return this != NULL && this->actor.id == ACTOR_BOSS_GANONDROF && this->actor.params == GND_REAL_BOSS;
+}
+
+static int BossGanondrof_CanApplyCoopReturn(const BossGanondrof* this) {
+    return HyruleCoop_BossGanondrofSupportsSharedCombat(this) && this->actor.child != NULL &&
+           this->actor.colChkInfo.health > 0 && this->work[GND_INVINC_TIMER] == 0 &&
+           this->flyMode != GND_FLY_PAINTING && this->actionFunc != BossGanondrof_Charge;
+}
+
+static int BossGanondrof_CanApplyCoopBodyHit(const BossGanondrof* this, uint32_t damageFlags) {
+    if (!HyruleCoop_BossGanondrofSupportsSharedCombat(this) || this->actor.child == NULL ||
+        this->actor.colChkInfo.health == 0 || this->work[GND_INVINC_TIMER] != 0) {
+        return 0;
+    }
+    if (this->flyMode == GND_FLY_PAINTING) {
+        return (damageFlags & 0x0001F8A4) != 0;
+    }
+    if (this->actionFunc == BossGanondrof_Charge || (damageFlags & 0x80) != 0) {
+        return 0;
+    }
+    return this->actionFunc == BossGanondrof_Stunned || (damageFlags & 0x0001F8A4) == 0;
+}
+
+static int BossGanondrof_GetCoopDamage(const BossGanondrof* this, uint8_t* damageEffect, uint8_t* damage,
+                                       uint32_t* damageFlags) {
+    uint32_t hitFlags;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL) {
+        return 0;
+    }
+    if (this->returnCount != 0 && BossGanondrof_CanApplyCoopReturn(this)) {
+        *damageEffect = HYRULE_COOP_PHANTOM_GANON_RETURN_HIT;
+        *damage = this->returnCount;
+        *damageFlags = 0;
+        return 1;
+    }
+    if (!(this->colliderBody.base.acFlags & AC_HIT) || this->colliderBody.info.acHitInfo == NULL) {
+        return 0;
+    }
+    hitFlags = this->colliderBody.info.acHitInfo->toucher.dmgFlags;
+    if (!BossGanondrof_CanApplyCoopBodyHit(this, hitFlags)) {
+        return 0;
+    }
+    *damageEffect = this->flyMode == GND_FLY_PAINTING ? HYRULE_COOP_PHANTOM_GANON_PAINTING_HIT : 0;
+    *damage = this->flyMode == GND_FLY_PAINTING ? 2 : 1;
+    *damageFlags = hitFlags;
+    return 1;
+}
+
+int HyruleCoop_BossGanondrofPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage,
+                                       uint32_t* damageFlags) {
+    return BossGanondrof_GetCoopDamage((const BossGanondrof*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_BossGanondrofConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage,
+                                          uint32_t* damageFlags) {
+    BossGanondrof* this = (BossGanondrof*)actorRef;
+    if (!BossGanondrof_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    if (*damageEffect == HYRULE_COOP_PHANTOM_GANON_RETURN_HIT) {
+        this->returnCount = 0;
+    } else {
+        this->colliderBody.base.acFlags &= ~AC_HIT;
+    }
+    return 1;
+}
+
+static int BossGanondrof_ApplyCoopDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                         uint32_t damageFlags, int authoritativeReplay) {
+    BossGanondrof* this = (BossGanondrof*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    EnfHG* horse;
+    uint8_t appliedDamage;
+    uint8_t canKill;
+
+    if (this == NULL || play == NULL || !HyruleCoop_BossGanondrofSupportsSharedCombat(this) ||
+        this->actor.child == NULL || this->actor.colChkInfo.health == 0 || this->actionFunc == BossGanondrof_Death) {
+        return 0;
+    }
+    if (!authoritativeReplay && this->work[GND_INVINC_TIMER] != 0) {
+        return 0;
+    }
+    horse = (EnfHG*)this->actor.child;
+
+    // The sender already passed Phantom Ganon's native phase and collider checks. Requiring the receiving copy to
+    // be in the same painting or volley frame would reject valid WAN hits, because those phases are simulated
+    // independently. Apply the accepted combat outcome through the native reactions while the host owns health.
+    if (damageEffect == HYRULE_COOP_PHANTOM_GANON_RETURN_HIT) {
+        BossGanondrof_SetupStunned(this, play);
+        if (damage >= 2) {
+            this->timers[0] = 120;
+        }
+        this->work[GND_INVINC_TIMER] = 10;
+        horse->hitTimer = 20;
+        Audio_PlayActorSound2(&this->actor, NA_SE_EN_FANTOM_DAMAGE);
+        return 1;
+    }
+
+    if (damageEffect == HYRULE_COOP_PHANTOM_GANON_PAINTING_HIT) {
+        appliedDamage = damage == 0 ? 2 : damage;
+        this->actor.colChkInfo.health =
+            this->actor.colChkInfo.health > appliedDamage ? this->actor.colChkInfo.health - appliedDamage : 0;
+        this->work[GND_INVINC_TIMER] = 10;
+        horse->hitTimer = 20;
+        Audio_PlayActorSound2(&this->actor, NA_SE_EN_FANTOM_DAMAGE);
+        return 1;
+    }
+
+    if (damageEffect != 0 || (damageFlags & 0x80) != 0) {
+        return 0;
+    }
+
+    appliedDamage = CollisionCheck_GetSwordDamage(damageFlags, play);
+    canKill = appliedDamage != 0;
+    if (appliedDamage == 0) {
+        appliedDamage = 2;
+    }
+    if (((int8_t)this->actor.colChkInfo.health > 2) || canKill) {
+        this->actor.colChkInfo.health = this->actor.colChkInfo.health > appliedDamage
+                                            ? this->actor.colChkInfo.health - appliedDamage
+                                            : 0;
+    }
+    if ((int8_t)this->actor.colChkInfo.health <= 0) {
+        BossGanondrof_SetupDeath(this, play);
+        Enemy_StartFinishingBlow(play, &this->actor);
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            GameInteractor_ExecuteOnBossDefeat(&this->actor);
+        }
+        return 1;
+    }
+
+    BossGanondrof_SetupStunned(this, play);
+    this->work[GND_INVINC_TIMER] = 10;
+    horse->hitTimer = 20;
+    Audio_PlayActorSound2(&this->actor, NA_SE_EN_FANTOM_DAMAGE);
+    return 1;
+}
+
+int HyruleCoop_BossGanondrofApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                        uint32_t damageFlags) {
+    return BossGanondrof_ApplyCoopDamage(actorRef, playRef, damageEffect, damage, damageFlags, 0);
+}
+
+int HyruleCoop_BossGanondrofReplayDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                         uint32_t damageFlags) {
+    return BossGanondrof_ApplyCoopDamage(actorRef, playRef, damageEffect, damage, damageFlags, 1);
 }
 
 void BossGanondrof_Update(Actor* thisx, PlayState* play) {

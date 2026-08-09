@@ -18,6 +18,10 @@ enum class SharedEnemyAdapterFamily : uint8_t {
     GoldSkulltula,
     Skulltula,
     SkulltulaFather,
+    Poe,
+    PoeSister,
+    Wolfos,
+    PhantomGanon,
 };
 
 enum class SharedEnemyNativeOutcome : uint8_t {
@@ -35,7 +39,7 @@ struct SharedEnemyAdapterContract {
 
 // Actor IDs are verified against z64.h in HyruleCoop.cpp. Keeping this table
 // independent from game headers lets the transport regression test run alone.
-constexpr std::array<SharedEnemyAdapterContract, 7> kSharedEnemyAdapterContracts = {{
+constexpr std::array<SharedEnemyAdapterContract, 11> kSharedEnemyAdapterContracts = {{
     { 0x0090, SharedEnemyAdapterFamily::RedeadGibdo, SharedEnemyNativeOutcome::Death, true, true },
     { 0x004B, SharedEnemyAdapterFamily::LostWoodsMoblin, SharedEnemyNativeOutcome::Death, true, true },
     { 0x0069, SharedEnemyAdapterFamily::BlueBubble, SharedEnemyNativeOutcome::Death, true, true },
@@ -43,6 +47,10 @@ constexpr std::array<SharedEnemyAdapterContract, 7> kSharedEnemyAdapterContracts
     { 0x0095, SharedEnemyAdapterFamily::GoldSkulltula, SharedEnemyNativeOutcome::Death, true, true },
     { 0x0037, SharedEnemyAdapterFamily::Skulltula, SharedEnemyNativeOutcome::Death, true, true },
     { 0x0188, SharedEnemyAdapterFamily::SkulltulaFather, SharedEnemyNativeOutcome::Stun, false, false },
+    { 0x000D, SharedEnemyAdapterFamily::Poe, SharedEnemyNativeOutcome::Death, true, true },
+    { 0x0091, SharedEnemyAdapterFamily::PoeSister, SharedEnemyNativeOutcome::Death, true, true },
+    { 0x01AF, SharedEnemyAdapterFamily::Wolfos, SharedEnemyNativeOutcome::Death, true, true },
+    { 0x0052, SharedEnemyAdapterFamily::PhantomGanon, SharedEnemyNativeOutcome::Death, false, true },
 }};
 
 constexpr const SharedEnemyAdapterContract* FindSharedEnemyAdapterContract(int16_t actorId) {

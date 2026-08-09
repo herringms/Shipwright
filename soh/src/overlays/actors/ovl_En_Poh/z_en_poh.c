@@ -8,6 +8,7 @@
 #include "objects/object_poh/object_poh.h"
 #include "objects/object_po_composer/object_po_composer.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 
 #define FLAGS \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_IGNORE_QUAKE)
@@ -636,7 +637,9 @@ void func_80ADF15C(EnPoh* this, PlayState* play) {
                              255, 1, 9, 1);
         if (this->unk_198 == 1) {
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_EXTINCT);
-            GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+            }
         }
     } else if (this->unk_198 == 28) {
         EnPoh_SetupDeath(this, play);
@@ -983,6 +986,47 @@ void func_80AE089C(EnPoh* this) {
         this->envColor.b = (s16)(rand * 160.0f) + 95;
         this->envColor.a = 200;
     }
+}
+
+static int EnPoh_GetCoopDamage(const EnPoh* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        !(this->colliderCyl.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags =
+        this->colliderCyl.info.acHitInfo != NULL ? this->colliderCyl.info.acHitInfo->toucher.dmgFlags : 0;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnPohPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnPoh_GetCoopDamage((const EnPoh*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnPohConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnPoh* this = (EnPoh*)actorRef;
+    if (!EnPoh_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->colliderCyl.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnPohApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags) {
+    EnPoh* this = (EnPoh*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 ||
+        (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->colliderCyl.base.acFlags |= AC_HIT;
+    func_80AE032C(this, play);
+    return 1;
 }
 
 void EnPoh_UpdateLiving(Actor* thisx, PlayState* play) {
