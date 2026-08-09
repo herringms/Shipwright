@@ -1264,7 +1264,8 @@ void Actor_Init(Actor* actor, PlayState* play) {
     if (Object_IsLoaded(&play->objectCtx, actor->objBankIndex)) {
         Actor_SetObjectDependency(play, actor);
 
-        if (GameInteractor_ShouldActorInit(actor)) {
+        // Hooks may replace or clear the callback. Validate it after every hook has run.
+        if (GameInteractor_ShouldActorInit(actor) && actor->init != NULL) {
             actor->init(actor, play);
             actor->init = NULL;
 
@@ -2603,7 +2604,9 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
             Actor* spawnedActor = Actor_SpawnEntry(&play->actorCtx, actorEntry++, play);
 
             // #region SOH [ObjectExtension] ActorListIndex tracking
-            SetActorListIndex(spawnedActor, (s16)i);
+            if (spawnedActor != NULL) {
+                SetActorListIndex(spawnedActor, (s16)i);
+            }
             // #endregion
         }
         play->numSetupActors = 0;
@@ -2646,7 +2649,8 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
                 if (Object_IsLoaded(&play->objectCtx, actor->objBankIndex)) {
                     Actor_SetObjectDependency(play, actor);
 
-                    if (GameInteractor_ShouldActorInit(actor)) {
+                    // Hooks may replace or clear the callback. Validate it after every hook has run.
+                    if (GameInteractor_ShouldActorInit(actor) && actor->init != NULL) {
                         actor->init(actor, play);
                         actor->init = NULL;
 
@@ -2697,7 +2701,8 @@ void Actor_UpdateAll(PlayState* play, ActorContext* actorCtx) {
                     if (actor->colorFilterTimer != 0) {
                         actor->colorFilterTimer--;
                     }
-                    if (GameInteractor_ShouldActorUpdate(actor)) {
+                    // Actor_Kill clears update, including when called by a ShouldActorUpdate hook.
+                    if (GameInteractor_ShouldActorUpdate(actor) && actor->update != NULL) {
                         actor->update(actor, play);
                         GameInteractor_ExecuteOnActorUpdate(actor);
                     }
@@ -3483,7 +3488,7 @@ void Actor_SpawnTransitionActors(PlayState* play, ActorContext* actorCtx) {
 
 Actor* Actor_SpawnEntry(ActorContext* actorCtx, ActorEntry* actorEntry, PlayState* play) {
     gMapLoading = 1;
-    Actor* ret;
+    Actor* ret = NULL;
 
     if (GameInteractor_Should(VB_SPAWN_ACTOR_ENTRY, true, actorCtx, actorEntry, play, &ret)) {
         ret = Actor_Spawn(actorCtx, play, actorEntry->id, actorEntry->pos.x, actorEntry->pos.y, actorEntry->pos.z,

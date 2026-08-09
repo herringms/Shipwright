@@ -618,14 +618,18 @@ struct CustomStalfosPairFightData {
 static ObjectExtension::Register<CustomStalfosPairFightData> CustomStalfosPairFightDataRegister;
 
 void CustomStalfosPairFightDestroy(Actor* thisx, PlayState* play) {
-    assert(ObjectExtension::GetInstance().Has<CustomStalfosPairFightData>(thisx));
-
     CustomStalfosPairFightData* customStalfosPairFightData =
         ObjectExtension::GetInstance().Get<CustomStalfosPairFightData>(thisx);
 
-    customStalfosPairFightData->moriBigst->dyna.actor.home.rot.z -= 1;
-
-    customStalfosPairFightData->originalDestroy(thisx, play);
+    if (customStalfosPairFightData == nullptr) {
+        return;
+    }
+    if (customStalfosPairFightData->moriBigst != nullptr) {
+        customStalfosPairFightData->moriBigst->dyna.actor.home.rot.z -= 1;
+    }
+    if (customStalfosPairFightData->originalDestroy != nullptr) {
+        customStalfosPairFightData->originalDestroy(thisx, play);
+    }
 
     ObjectExtension::GetInstance().Remove<CustomStalfosPairFightData>(thisx);
 }
@@ -638,13 +642,17 @@ struct CustomPeehatLarvaData {
 static ObjectExtension::Register<CustomPeehatLarvaData> CustomPeehatLarvaDataRegister;
 
 void CustomPeehatLarvaDestroy(Actor* thisx, PlayState* play) {
-    assert(ObjectExtension::GetInstance().Has<CustomPeehatLarvaData>(thisx));
-
     CustomPeehatLarvaData* customPeehatLarvaData = ObjectExtension::GetInstance().Get<CustomPeehatLarvaData>(thisx);
 
-    customPeehatLarvaData->peehat->unk_2FA -= 1;
-
-    customPeehatLarvaData->originalDestroy(thisx, play);
+    if (customPeehatLarvaData == nullptr) {
+        return;
+    }
+    if (customPeehatLarvaData->peehat != nullptr) {
+        customPeehatLarvaData->peehat->unk_2FA -= 1;
+    }
+    if (customPeehatLarvaData->originalDestroy != nullptr) {
+        customPeehatLarvaData->originalDestroy(thisx, play);
+    }
 
     ObjectExtension::GetInstance().Remove<CustomPeehatLarvaData>(thisx);
 }
@@ -976,15 +984,19 @@ void RegisterEnemyRandomizer() {
         Actor* enemy2 = Actor_Spawn(&play->actorCtx, play, actorId, static_cast<f32>(posX), static_cast<f32>(posY),
                                     static_cast<f32>(posZ), rotX, rotY, rotZ, params);
 
-        moriBigst->dyna.actor.home.rot.z = 2;
-
-        ObjectExtension::GetInstance().Set<CustomStalfosPairFightData>(
-            enemy1, CustomStalfosPairFightData{ .moriBigst = moriBigst, .originalDestroy = enemy1->destroy });
-        ObjectExtension::GetInstance().Set<CustomStalfosPairFightData>(
-            enemy2, CustomStalfosPairFightData{ .moriBigst = moriBigst, .originalDestroy = enemy2->destroy });
-
-        enemy1->destroy = CustomStalfosPairFightDestroy;
-        enemy2->destroy = CustomStalfosPairFightDestroy;
+        Actor* enemies[2];
+        enemies[0] = enemy1;
+        enemies[1] = enemy2;
+        moriBigst->dyna.actor.home.rot.z = 0;
+        for (Actor* enemy : enemies) {
+            if (enemy == nullptr) {
+                continue;
+            }
+            moriBigst->dyna.actor.home.rot.z += 1;
+            ObjectExtension::GetInstance().Set<CustomStalfosPairFightData>(
+                enemy, CustomStalfosPairFightData{ .moriBigst = moriBigst, .originalDestroy = enemy->destroy });
+            enemy->destroy = CustomStalfosPairFightDestroy;
+        }
 
         *should = false;
     });
