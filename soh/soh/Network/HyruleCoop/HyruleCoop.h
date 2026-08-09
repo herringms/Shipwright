@@ -2,6 +2,7 @@
 
 #include "DirectSession.h"
 #include "PlayerInterpolation.h"
+#include "RemotePlayerRoomPolicy.h"
 #include "StalchildPolicy.h"
 
 #include <atomic>
@@ -45,12 +46,14 @@ class Manager {
     TransportTelemetry GetTransportTelemetry() const;
     const PlayerSnapshotMessage* GetRemotePlayerSnapshot() const;
     const std::string& GetRemotePlayerName() const;
+    TimelineScope GetLocalTimelineScope() const;
     bool SanitizeSaveCopy(void* saveContext) const;
     void PrepareRemotePlayer(void* actor);
     void NotifyRemotePlayerDestroyed(void* actor);
     void NotifyRemotePlayerPoseApplied(bool meleeActive);
     void NotifyRemotePlayerDrawApplied(bool meleeActive, uint8_t currentMask);
     void NotifyRemotePlayerMapPositionRead(int16_t scene);
+    void NotifyMasterSwordPullStarted();
     bool ShouldRegisterStalchildAttack(void* actor, bool nativeAttackActive) const;
     bool ShouldProcessStalchildHit(void* actor, void* attacker);
 
@@ -63,6 +66,7 @@ class Manager {
     void HandleHello(const Packet& packet);
     void HandleHelloAck(const Packet& packet);
     void HandleClockSnapshot(const Packet& packet);
+    void ApplyPendingClockSnapshot();
     void HandlePlayerSnapshot(const Packet& packet);
     void HandlePlayerPresentation(const Packet& packet);
     void HandleSnapshotRequest(const Packet& packet);
@@ -75,6 +79,8 @@ class Manager {
     void HandleCollectibleIntent(const Packet& packet);
     void HandleProgressionSnapshot(const Packet& packet);
     void HandleProgressionIntent(const Packet& packet);
+    void HandleStoryEventIntent(const Packet& packet);
+    void HandleStoryEventCommand(const Packet& packet);
     void SendHello();
     void SendHelloAck(bool accepted, const std::string& reason);
     void SendClockSnapshot();
@@ -93,6 +99,9 @@ class Manager {
     void SendProgressionItemIntent(uint16_t itemId, uint16_t modIndex, uint16_t mapIndex);
     void SendDungeonKeyIntent(uint16_t mapIndex);
     void SendGlobalFlagIntent(int16_t flagType, int16_t flag, bool set);
+    void SendStoryEventIntent(StoryEventKind kind);
+    uint64_t SendStoryEventCommand(StoryEventKind kind, uint64_t participantId, uint64_t requestId,
+                                   uint64_t operationEpoch = 0);
     void SendDekuBabaSnapshot(void* actor, bool alive);
     void SendGohmaSnapshot(void* actor, bool alive);
     void SendGenericEnemySnapshot(void* actor, bool alive);
@@ -134,7 +143,11 @@ class Manager {
     bool IsBarrierTimelineReady(const BarrierState& state) const;
     void PopulateBarrierTimeline(BarrierState& state) const;
     void BeginReconnectBarrier();
-    void BeginCastleEscapeStoryBarrier();
+    void NotifyLocalStoryEvent(StoryEventKind kind);
+    bool ShouldCoordinateTempleStory(StoryEventKind kind, bool remoteInitiated) const;
+    bool ShouldReplayTempleStoryPresentation(StoryEventKind kind) const;
+    void ReplayTempleStoryPresentation(StoryEventKind kind);
+    void BeginStoryBarrier(StoryEventKind storyEvent);
     void UpdateStoryEvent();
     void CompleteBarrierIfReady();
     void CaptureSaveOverlay();
@@ -143,7 +156,7 @@ class Manager {
     void SetAutomatedTestStage(uint8_t stage, const std::string& event, const std::string& detail = "");
     void ReportAutomatedTest(const std::string& event, const std::string& detail = "");
     void FailAutomatedTest(const std::string& reason);
-    void WarpAutomatedTestToForest();
+    void BeginAutomatedForestBarrier();
     void BeginAutomatedStalchildBarrier();
     void BeginAutomatedBossBarrier();
     bool SpawnAutomatedTestDekuBaba();
@@ -152,6 +165,8 @@ class Manager {
     void ApplyCanonicalProgression(const SharedProgressionState& state);
     void ReconcileKingZora(void* actor);
     void ReconcileZorasFountainBombableWall(void* actor);
+    void ReconcileDoorOfTime(void* actor);
+    void ReconcileMasterSwordChamber(void* actor);
     bool IsCurrentScope(const SessionScope& candidate) const;
     bool IsSaveLoaded() const;
 
@@ -191,6 +206,7 @@ class Manager {
     int16_t lastRemoteMeleeScene = -1;
     void* remotePlayer = nullptr;
     bool preparingRemotePlayer = false;
+    int16_t loadedSceneLayer = -1;
     bool applyingAuthoritativeState = false;
     uint64_t nextRequestId = 1;
     uint64_t nextOperationEpoch = 1;
@@ -219,6 +235,7 @@ class Manager {
     std::unordered_map<uint64_t, uint32_t> lastGuestAttackTick;
     std::unordered_map<uint64_t, void*> localDekuBabas;
     std::unordered_map<uint64_t, void*> localGohmas;
+    std::unordered_set<uint64_t> localGohmaDeathPresentations;
     std::unordered_map<uint64_t, void*> localGenericEnemies;
     std::unordered_map<uint64_t, void*> localJabuActors;
     std::unordered_map<uint64_t, void*> localBarinadeActors;
@@ -233,9 +250,16 @@ class Manager {
     std::unordered_map<uint64_t, ActorSnapshotMessage> actorSnapshots;
     std::unordered_set<uint64_t> genericGuestTargetsHitThisSwing;
     std::optional<uint64_t> guestStalchildTargetThisSwing;
-    bool castleEscapeStoryPending = false;
-    bool castleEscapeStoryActive = false;
-    bool castleEscapeCutsceneObserved = false;
+    uint64_t lastAppliedStoryOperationEpoch = 0;
+    std::optional<ClockSnapshotMessage> pendingClockSnapshot;
+    StoryEventKind pendingStoryEvent = StoryEventKind::None;
+    StoryEventKind activeStoryEvent = StoryEventKind::None;
+    bool storyCutsceneObserved = false;
+    bool storyPresentationBaselineApplied = false;
+    bool doorOfTimeOpeningPresented = false;
+    bool masterSwordEntrancePresented = false;
+    bool masterSwordPullPresented = false;
+    bool coordinatedMasterSwordPullActive = false;
 
     bool automatedTestEnabled = false;
     bool automatedTestClient = false;
@@ -244,6 +268,7 @@ class Manager {
     bool automatedTestActorSpawned = false;
     bool automatedTestReconnectStarted = false;
     bool automatedTestProgressionTriggered = false;
+    bool automatedTestProgressionResourcesCaptured = false;
     bool automatedTestDungeonMapChestTriggered = false;
     bool automatedTestDungeonCompassIntentTriggered = false;
     bool automatedTestWorldStateTriggered = false;
@@ -260,6 +285,7 @@ class Manager {
     bool automatedTestRemotePresentationRendered = false;
     bool automatedTestRemoteMapPositionRead = false;
     bool automatedTestFirstDamageObserved = false;
+    bool automatedTestBossDeathPresentationObserved = false;
     bool automatedTestPostDeathCleanupObserved = false;
     bool automatedTestStalchildDawnTriggered = false;
     bool automatedTestStalchildTargetAgreementObserved = false;
@@ -278,6 +304,9 @@ class Manager {
     uint64_t automatedTestDungeonCompassIntentSnapshotRevision = 0;
     int16_t automatedTestLastObservedHealth = -1;
     int16_t automatedTestNonTargetHealth = -1;
+    int16_t automatedTestProgressionRupees = 0;
+    int8_t automatedTestProgressionArrows = 0;
+    int8_t automatedTestProgressionMagic = 0;
     int16_t automatedTestHostReconnectRupees = 0;
     int8_t automatedTestHostReconnectArrows = 0;
     int8_t automatedTestHostReconnectMagic = 0;

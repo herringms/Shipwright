@@ -83,6 +83,23 @@ uint64_t GenerateNonce64() {
     return value == 0 ? counter.fetch_add(1) : value;
 }
 
+bool BarrierRequiresParticipantRelocation(BarrierKind kind) {
+    return kind != BarrierKind::ReconnectSnapshot;
+}
+
+bool BarrierParticipantLocationReady(const BarrierState& state, int16_t currentScene, int16_t currentRoom,
+                                     bool timelineReady) {
+    if (!BarrierRequiresParticipantRelocation(state.kind)) {
+        return true;
+    }
+    return timelineReady && currentScene == state.targetScene &&
+           (state.targetRoom < 0 || currentRoom == state.targetRoom);
+}
+
+bool ClockSnapshotMayApply(bool messageActive, bool ocarinaActive, bool cutsceneActive, bool playerCutsceneActive) {
+    return !messageActive && !ocarinaActive && !cutsceneActive && !playerCutsceneActive;
+}
+
 void RequestLedger::BeginScope(SessionScope scope) {
     currentScope = scope;
     outcomes.clear();

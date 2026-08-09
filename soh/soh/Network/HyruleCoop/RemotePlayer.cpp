@@ -105,7 +105,10 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
     }
     if (!HyruleCoop::IsRemotePlayerVisibleInRoom(
             gPlayState->sceneNum, activeRoom, state->scene, state->room,
-            { gPlayState->linkAgeOnLoad, static_cast<int16_t>(gSaveContext.sceneLayer) },
+            HyruleCoop::Manager::Instance != nullptr
+                ? HyruleCoop::Manager::Instance->GetLocalTimelineScope()
+                : HyruleCoop::TimelineScope{ gPlayState->linkAgeOnLoad,
+                                             static_cast<int16_t>(gSaveContext.sceneLayer) },
             { state->linkAge, state->sceneLayer })) {
         actor->shape.shadowAlpha = 0;
         actor->world.pos = { -9999.0f, -9999.0f, -9999.0f };
@@ -161,17 +164,29 @@ extern "C" void HyruleCoopRemotePlayer_Draw(Actor* actor, PlayState* play) {
     if (!GetState(state) || gPlayState == nullptr ||
         !HyruleCoop::IsRemotePlayerVisibleInRoom(gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
                                                   state->scene, state->room,
-                                                  { gPlayState->linkAgeOnLoad,
-                                                    static_cast<int16_t>(gSaveContext.sceneLayer) },
+                                                  HyruleCoop::Manager::Instance != nullptr
+                                                      ? HyruleCoop::Manager::Instance->GetLocalTimelineScope()
+                                                      : HyruleCoop::TimelineScope{
+                                                            gPlayState->linkAgeOnLoad,
+                                                            static_cast<int16_t>(gSaveContext.sceneLayer) },
                                                   { state->linkAge, state->sceneLayer })) {
         return;
     }
 
     const s32 originalAge = gSaveContext.linkAge;
     const u8 originalButtonItem = gSaveContext.equips.buttonItems[0];
+    auto originalUpdate = actor->update;
     gSaveContext.linkAge = state->linkAge;
     gSaveContext.equips.buttonItems[0] = state->buttonItem;
+
+    // Player_Draw normally builds and registers Link's sword and shield colliders. A remote Link is a visual
+    // projection: its attacks are validated and committed through network intents, so allowing these draw-time
+    // colliders to participate would damage the same enemy once natively and once authoritatively. The collision
+    // API already rejects actors without an update callback, which lets us preserve the complete weapon render
+    // without leaking gameplay collision from this presentation actor.
+    actor->update = nullptr;
     Player_Draw(actor, play);
+    actor->update = originalUpdate;
     HyruleCoop::Manager::Instance->NotifyRemotePlayerDrawApplied(state->meleeWeaponState > 0, state->currentMask);
     gSaveContext.linkAge = originalAge;
     gSaveContext.equips.buttonItems[0] = originalButtonItem;

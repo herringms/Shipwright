@@ -82,6 +82,13 @@ void ReconcileDurableRewardInvariants(SaveContext* saveContext) {
             (saveContext->inventory.upgrades & ~kScaleMask) | (1u << kScaleShift);
     }
 
+    // The escape cutscene records this event before the song reward is fully
+    // committed. If a peer or save occurs in that window, the durable event
+    // can survive while the quest bit is lost, permanently blocking progress.
+    if (HasPackedFlag(saveContext->eventChkInf, EVENTCHKINF_LEARNED_SONG_OF_TIME)) {
+        saveContext->inventory.questItems |= (1u << QUEST_SONG_TIME);
+    }
+
     // A synchronized chest flag must never strand a peer without the fixed
     // vanilla reward that made the chest disappear. Randomizer chests are
     // intentionally excluded because their contents are not tied to flags.

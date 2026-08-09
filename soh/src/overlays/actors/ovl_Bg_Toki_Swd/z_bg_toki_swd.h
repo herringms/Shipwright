@@ -14,4 +14,7 @@ typedef struct BgTokiSwd {
     /* 0x0150 */ ColliderCylinder collider;
 } BgTokiSwd; // size = 0x019C
 
+s32 BgTokiSwd_PlayEntranceCutscene(PlayState* play);
+s32 BgTokiSwd_PlayPullCutscene(PlayState* play);
+
 #endif

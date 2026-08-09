@@ -12,7 +12,7 @@
 namespace HyruleCoop {
 
 constexpr uint32_t kPacketMagic = 0x48434F50; // HCOP
-constexpr uint16_t kProtocolVersion = 10;
+constexpr uint16_t kProtocolVersion = 11;
 constexpr size_t kHeaderSize = 24;
 constexpr uint32_t kMaximumPayloadSize = 1024 * 1024;
 constexpr size_t kMaximumActorAdapterWords = 64;
@@ -40,6 +40,8 @@ enum class MessageType : uint16_t {
     ProgressionSnapshot = 15,
     ProgressionIntent = 16,
     PlayerPresentation = 17,
+    StoryEventIntent = 18,
+    StoryEventCommand = 19,
 };
 
 struct Packet {
@@ -330,6 +332,25 @@ struct ProgressionSnapshotMessage {
     SharedProgressionState shared;
 };
 
+enum class StoryEventKind : uint8_t {
+    None,
+    DoorOfTimeOpening,
+    MasterSwordChamberEntrance,
+    MasterSwordPull,
+    CastleEscape,
+};
+
+struct StoryEventMessage {
+    SessionScope scope;
+    uint64_t operationEpoch = 0;
+    uint64_t participantId = 0;
+    uint64_t requestId = 0;
+    StoryEventKind kind = StoryEventKind::None;
+    int16_t scene = -1;
+    int32_t linkAge = -1;
+    int16_t sceneLayer = -1;
+};
+
 std::vector<uint8_t> EncodeHello(const HelloMessage& message);
 std::optional<HelloMessage> DecodeHello(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodeHelloAck(const HelloAckMessage& message);
@@ -362,5 +383,7 @@ std::vector<uint8_t> EncodeProgressionSnapshot(const ProgressionSnapshotMessage&
 std::optional<ProgressionSnapshotMessage> DecodeProgressionSnapshot(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodeProgressionIntent(const ProgressionIntentMessage& message);
 std::optional<ProgressionIntentMessage> DecodeProgressionIntent(const std::vector<uint8_t>& payload);
+std::vector<uint8_t> EncodeStoryEvent(const StoryEventMessage& message);
+std::optional<StoryEventMessage> DecodeStoryEvent(const std::vector<uint8_t>& payload);
 
 } // namespace HyruleCoop

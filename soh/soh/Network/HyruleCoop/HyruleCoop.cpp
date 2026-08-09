@@ -3,6 +3,7 @@
 #include "DekuBabaAdapter.h"
 #include "DungeonRewardPolicy.h"
 #include "EntityIdentity.h"
+#include "GenericEnemyBridge.h"
 #include "GohmaAdapter.h"
 #include "JabuActorBridge.h"
 #include "ProgressionAdapter.h"
@@ -21,6 +22,7 @@
 #include <SDL2/SDL.h>
 #include <algorithm>
 #include <array>
+#include <cstdarg>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -38,8 +40,11 @@ extern "C" {
 #include "functions.h"
 #include "macros.h"
 #include "src/overlays/actors/ovl_Bg_Spot08_Bakudankabe/z_bg_spot08_bakudankabe.h"
+#include "src/overlays/actors/ovl_Bg_Toki_Swd/z_bg_toki_swd.h"
+#include "src/overlays/actors/ovl_Demo_Kankyo/z_demo_kankyo.h"
 #include "src/overlays/actors/ovl_En_Encount1/z_en_encount1.h"
 #include "src/overlays/actors/ovl_En_Kz/z_en_kz.h"
+#include "src/overlays/actors/ovl_En_Okarina_Tag/z_en_okarina_tag.h"
 #include "src/overlays/actors/ovl_En_Skb/z_en_skb.h"
 #include "variables.h"
 #include "z64.h"
@@ -134,6 +139,10 @@ enum JabuActorAdapterWord : uint8_t {
 };
 constexpr const char* kHyruleCoopCompatibilityId = "hyrule-coop-poc.3";
 
+bool HasSharedEventFlag(const SharedProgressionState& state, uint16_t flag) {
+    return (state.eventChkInf[flag >> 4] & (1u << (flag & 0xF))) != 0;
+}
+
 uint64_t HashFile(const std::filesystem::path& path, uint64_t hash) {
     std::ifstream stream(path, std::ios::binary);
     if (!stream) {
@@ -149,11 +158,6 @@ uint64_t HashFile(const std::filesystem::path& path, uint64_t hash) {
         }
     }
     return hash;
-}
-
-TimelineScope LocalTimelineScope() {
-    return { gPlayState == nullptr ? gSaveContext.linkAge : gPlayState->linkAgeOnLoad,
-             static_cast<int16_t>(gSaveContext.sceneLayer) };
 }
 
 TimelineScope SnapshotTimelineScope(const PlayerSnapshotMessage& snapshot) {
@@ -813,6 +817,7 @@ void Manager::Update() {
     for (const Packet& packet : transport.TakeIncomingPackets()) {
         HandlePacket(packet);
     }
+    ApplyPendingClockSnapshot();
     UpdateStoryEvent();
 
     if (transportState == TransportState::Error) {
@@ -986,7 +991,7 @@ const PlayerSnapshotMessage* Manager::GetRemotePlayerSnapshot() const {
     if (!remotePlayerInterpolator.Sample(SDL_GetTicks64(), sampled)) {
         return nullptr;
     }
-    if (!IsSameTimeline(LocalTimelineScope(), SnapshotTimelineScope(sampled))) {
+    if (!IsSameTimeline(GetLocalTimelineScope(), SnapshotTimelineScope(sampled))) {
         return nullptr;
     }
     if (remotePlayerPresentation.has_value()) {
@@ -998,6 +1003,11 @@ const PlayerSnapshotMessage* Manager::GetRemotePlayerSnapshot() const {
 
 const std::string& Manager::GetRemotePlayerName() const {
     return remotePlayerName;
+}
+
+TimelineScope Manager::GetLocalTimelineScope() const {
+    return { gPlayState == nullptr ? gSaveContext.linkAge : gPlayState->linkAgeOnLoad,
+             loadedSceneLayer >= 0 ? loadedSceneLayer : static_cast<int16_t>(gSaveContext.sceneLayer) };
 }
 
 bool Manager::ShouldRegisterStalchildAttack(void* actor, bool nativeAttackActive) const {
@@ -1174,19 +1184,58 @@ void Manager::RegisterHooks(bool enabled) {
         ReportAutomatedTest("save-boot-requested", "slot=1");
     });
     COND_HOOK(OnGameFrameUpdate, enabled, [this]() { Update(); });
+    COND_HOOK(OnVanillaBehavior, enabled,
+              [this](GIVanillaBehavior id, bool* should, va_list originalArgs) {
+                  if (should == nullptr) {
+                      return;
+                  }
+                  if (id == VB_PLAY_PULL_MASTER_SWORD_CS && coordinatedMasterSwordPullActive) {
+                      // The peer may publish the durable pulled-sword flag before this local replay reaches its
+                      // terminator. Keep the coordinated participant on the first-pull branch anyway.
+                      *should = true;
+                      return;
+                  }
+                  if (applyingAuthoritativeState || !*should || !IsSaveLoaded()) {
+                      return;
+                  }
+                  if (id == VB_PLAY_DOOR_OF_TIME_CS) {
+                      doorOfTimeOpeningPresented = true;
+                      if (handshakeComplete) {
+                          NotifyLocalStoryEvent(StoryEventKind::DoorOfTimeOpening);
+                      }
+                  } else if (id == VB_PLAY_ENTRANCE_CS) {
+                      va_list args;
+                      va_copy(args, originalArgs);
+                      const s32 entranceFlag = va_arg(args, s32);
+                      va_end(args);
+                      if (entranceFlag == EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER) {
+                          masterSwordEntrancePresented = true;
+                          if (handshakeComplete) {
+                              NotifyLocalStoryEvent(StoryEventKind::MasterSwordChamberEntrance);
+                          }
+                      }
+                  }
+              });
     COND_HOOK(OnSaveFile, enabled && automatedTestEnabled, [this](int32_t fileNum, int32_t sectionId) {
         if (fileNum == 0 && sectionId == SECTION_ID_BASE && automatedTestSaveRequested) {
             automatedTestSaveCompleted.store(true);
         }
     });
     COND_HOOK(OnSceneSpawnActors, enabled, [this]() {
+        // Save-overlay restoration protects the guest's permanent file, but it
+        // must not redefine the scene header that is already loaded in memory.
+        loadedSceneLayer = static_cast<int16_t>(gSaveContext.sceneLayer);
         remotePlayer = nullptr;
         localDekuBabas.clear();
         localGohmas.clear();
+        localGohmaDeathPresentations.clear();
         localGenericEnemies.clear();
         localJabuActors.clear();
         localBarinadeActors.clear();
         ClearStalchildSceneState();
+        if (gPlayState != nullptr && gPlayState->sceneNum != SCENE_TEMPLE_OF_TIME) {
+            coordinatedMasterSwordPullActive = false;
+        }
         if (automatedTestEnabled && !automatedTestClient && gPlayState != nullptr &&
             gPlayState->sceneNum == SCENE_DEKU_TREE_BOSS) {
             // Keep the authoritative test player outside Gohma's entrance trigger. The harness prepares the
@@ -1277,7 +1326,7 @@ void Manager::RegisterHooks(bool enabled) {
         if (transport.GetRole() == SessionRole::Host) {
             if (handshakeComplete && flagType == FLAG_EVENT_CHECK_INF &&
                 flag == EVENTCHKINF_ZELDA_FLED_HYRULE_CASTLE) {
-                castleEscapeStoryPending = true;
+                pendingStoryEvent = StoryEventKind::CastleEscape;
             }
             CaptureCanonicalProgression();
             ++progressionRevision;
@@ -1420,6 +1469,9 @@ void Manager::RegisterHooks(bool enabled) {
     COND_ID_HOOK(OnActorUpdate, ACTOR_EN_KZ, enabled, [this](void* actor) { ReconcileKingZora(actor); });
     COND_ID_HOOK(ShouldActorUpdate, ACTOR_BG_SPOT08_BAKUDANKABE, enabled,
                  [this](void* actor, bool*) { ReconcileZorasFountainBombableWall(actor); });
+    COND_ID_HOOK(OnActorUpdate, ACTOR_DEMO_KANKYO, enabled, [this](void* actor) { ReconcileDoorOfTime(actor); });
+    COND_ID_HOOK(OnActorUpdate, ACTOR_BG_TOKI_SWD, enabled,
+                 [this](void* actor) { ReconcileMasterSwordChamber(actor); });
 }
 
 void Manager::ResetPeerState() {
@@ -1487,13 +1539,21 @@ void Manager::ResetSessionState() {
     canonicalProgressionCaptured = false;
     localDekuBabas.clear();
     localGohmas.clear();
+    localGohmaDeathPresentations.clear();
     localJabuActors.clear();
     localBarinadeActors.clear();
     ClearStalchildSessionState();
     actorSnapshots.clear();
-    castleEscapeStoryPending = false;
-    castleEscapeStoryActive = false;
-    castleEscapeCutsceneObserved = false;
+    lastAppliedStoryOperationEpoch = 0;
+    pendingClockSnapshot.reset();
+    pendingStoryEvent = StoryEventKind::None;
+    activeStoryEvent = StoryEventKind::None;
+    storyCutsceneObserved = false;
+    storyPresentationBaselineApplied = false;
+    doorOfTimeOpeningPresented = false;
+    masterSwordEntrancePresented = false;
+    masterSwordPullPresented = false;
+    coordinatedMasterSwordPullActive = false;
 }
 
 void Manager::BeginHandshakeIfNeeded() {
@@ -1554,6 +1614,12 @@ void Manager::HandlePacket(const Packet& packet) {
             break;
         case MessageType::ProgressionIntent:
             HandleProgressionIntent(packet);
+            break;
+        case MessageType::StoryEventIntent:
+            HandleStoryEventIntent(packet);
+            break;
+        case MessageType::StoryEventCommand:
+            HandleStoryEventCommand(packet);
             break;
         default:
             SPDLOG_WARN("[HyruleCoop] Ignoring unsupported packet type {}", static_cast<uint16_t>(packet.type));
@@ -1665,10 +1731,30 @@ void Manager::HandleClockSnapshot(const Packet& packet) {
     if (!message.has_value() || !IsCurrentScope(message->scope)) {
         return;
     }
-    gSaveContext.dayTime = message->dayTime;
-    gSaveContext.skyboxTime = message->skyboxTime;
-    gSaveContext.nightFlag = message->night;
-    gTimeSpeed = message->timeSpeed;
+    pendingClockSnapshot = *message;
+    ApplyPendingClockSnapshot();
+}
+
+void Manager::ApplyPendingClockSnapshot() {
+    if (!pendingClockSnapshot.has_value() || gPlayState == nullptr) {
+        return;
+    }
+
+    // Changing the world clock while an ocarina/message sequence owns actor and
+    // player state can invalidate the active interaction. Keep only the newest
+    // host value and apply it as soon as normal gameplay resumes.
+    const bool ocarinaActive = gPlayState->msgCtx.ocarinaMode != OCARINA_MODE_00 &&
+                               gPlayState->msgCtx.ocarinaMode != OCARINA_MODE_04;
+    if (!ClockSnapshotMayApply(gPlayState->msgCtx.msgMode != MSGMODE_NONE, ocarinaActive,
+                               gPlayState->csCtx.state != CS_STATE_IDLE, Player_InCsMode(gPlayState))) {
+        return;
+    }
+
+    gSaveContext.dayTime = pendingClockSnapshot->dayTime;
+    gSaveContext.skyboxTime = pendingClockSnapshot->skyboxTime;
+    gSaveContext.nightFlag = pendingClockSnapshot->night;
+    gTimeSpeed = pendingClockSnapshot->timeSpeed;
+    pendingClockSnapshot.reset();
 }
 
 void Manager::HandlePlayerSnapshot(const Packet& packet) {
@@ -1891,9 +1977,18 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
             ClearPendingGuestAttack(message->entityId);
             lastGuestAttackTick.erase(message->entityId);
             localGohmas.erase(local);
+            localGohmaDeathPresentations.erase(message->entityId);
             return;
         }
-        ApplyGohmaSnapshot(local->second, *message);
+        if (message->health <= 0 && message->stateId == 2) {
+            if (localGohmaDeathPresentations.insert(message->entityId).second) {
+                ApplyGohmaSnapshot(local->second, *message);
+                SPDLOG_INFO("[HyruleCoop] Starting local Gohma defeat presentation for entity {}",
+                            message->entityId);
+            }
+        } else {
+            ApplyGohmaSnapshot(local->second, *message);
+        }
     } else if (stalchildSnapshot) {
         if (!message->alive) {
             const auto local = localStalchildren.find(message->entityId);
@@ -1970,10 +2065,21 @@ void Manager::HandleBarrierSnapshot(const Packet& packet) {
         return;
     }
     const auto message = DecodeBarrierSnapshot(packet.payload);
-    if (!message.has_value() || !IsCurrentScope(message->state.scope) ||
-        !barrierCoordinator.Reconcile(message->state)) {
+    const bool currentScope = message.has_value() && IsCurrentScope(message->state.scope);
+    const bool reconciled = currentScope && barrierCoordinator.Reconcile(message->state);
+    if (automatedTestEnabled && automatedTestStage == TestAwaitingReconnect) {
+        ReportAutomatedTest(
+            "client-reconnect-barrier-received",
+            "decoded=" + std::to_string(message.has_value()) + " scope=" + std::to_string(currentScope) +
+                " reconciled=" + std::to_string(reconciled) +
+                " phase=" + std::to_string(message.has_value() ? static_cast<int>(message->state.phase) : -1) +
+                " kind=" + std::to_string(message.has_value() ? static_cast<int>(message->state.kind) : -1) +
+                " epoch=" + std::to_string(message.has_value() ? message->state.operationEpoch : 0));
+    }
+    if (!message.has_value() || !currentScope || !reconciled) {
         return;
     }
+
     if (message->state.phase == BarrierPhase::Aborted) {
         protocolError = "The host aborted shared-world preparation";
         phase = ConnectionPhase::Failed;
@@ -1984,6 +2090,17 @@ void Manager::HandleBarrierSnapshot(const Packet& packet) {
         return;
     }
     if (message->state.phase != BarrierPhase::WaitingForParticipants) {
+        return;
+    }
+    // Reconnect establishes campaign authority, not a rendezvous. Keep the
+    // guest's valid local position and timeline; explicit story/scene barriers
+    // remain responsible for moving participants together.
+    if (!BarrierRequiresParticipantRelocation(message->state.kind)) {
+        if (automatedTestEnabled && automatedTestStage == TestAwaitingReconnect) {
+            ReportAutomatedTest("client-reconnect-barrier-ready-sent",
+                                "epoch=" + std::to_string(message->state.operationEpoch));
+        }
+        SendBarrierReady();
         return;
     }
     if (message->state.targetCutsceneIndex >= 0) {
@@ -2008,10 +2125,24 @@ void Manager::HandleBarrierReady(const Packet& packet) {
     }
     const auto message = DecodeBarrierReady(packet.payload);
     const BarrierState& state = barrierCoordinator.GetState();
-    if (!message.has_value() || !IsCurrentScope(message->scope) || message->participantId != 2 ||
-        message->operationEpoch != state.operationEpoch || message->currentScene != state.targetScene ||
-        (state.targetRoom >= 0 && message->currentRoom != state.targetRoom) ||
-        !barrierCoordinator.MarkReady(message->participantId)) {
+    const bool currentScope = message.has_value() && IsCurrentScope(message->scope);
+    const bool participantValid = message.has_value() && message->participantId == 2;
+    const bool epochValid = message.has_value() && message->operationEpoch == state.operationEpoch;
+    const bool locationReady = message.has_value() &&
+                               BarrierParticipantLocationReady(state, message->currentScene, message->currentRoom, true);
+    const bool readyMarked = currentScope && participantValid && epochValid && locationReady &&
+                             barrierCoordinator.MarkReady(message->participantId);
+    if (automatedTestEnabled && automatedTestStage == TestAwaitingReconnect) {
+        ReportAutomatedTest(
+            "host-reconnect-barrier-ready-received",
+            "decoded=" + std::to_string(message.has_value()) + " scope=" + std::to_string(currentScope) +
+                " participant=" + std::to_string(participantValid) + " epoch=" + std::to_string(epochValid) +
+                " location=" + std::to_string(locationReady) + " marked=" + std::to_string(readyMarked) +
+                " hostPhase=" + std::to_string(static_cast<int>(state.phase)) +
+                " hostEpoch=" + std::to_string(state.operationEpoch) +
+                " guestEpoch=" + std::to_string(message.has_value() ? message->operationEpoch : 0));
+    }
+    if (!message.has_value() || !currentScope || !participantValid || !epochValid || !locationReady || !readyMarked) {
         return;
     }
     CompleteBarrierIfReady();
@@ -2302,7 +2433,7 @@ void Manager::HandleProgressionIntent(const Packet& packet) {
     applyingAuthoritativeState = false;
     if (accepted && message->kind == ProgressionIntentKind::GlobalFlagChanged && message->set &&
         message->flagType == FLAG_EVENT_CHECK_INF && message->flag == EVENTCHKINF_ZELDA_FLED_HYRULE_CASTLE) {
-        castleEscapeStoryPending = true;
+        pendingStoryEvent = StoryEventKind::CastleEscape;
     }
     if (accepted) {
         CaptureCanonicalProgression();
@@ -2314,6 +2445,71 @@ void Manager::HandleProgressionIntent(const Packet& packet) {
                                   : message->itemId;
     requestLedger.Record(request, { accepted, resultId, progressionRevision });
     SendProgressionSnapshot();
+}
+
+void Manager::HandleStoryEventIntent(const Packet& packet) {
+    if (transport.GetRole() != SessionRole::Host || !handshakeComplete || !IsSaveLoaded()) {
+        return;
+    }
+    const auto message = DecodeStoryEvent(packet.payload);
+    if (!message.has_value() || !IsCurrentScope(message->scope) || message->operationEpoch != 0 ||
+        message->participantId != 2 || message->requestId == 0 || !remotePlayerSnapshot.has_value()) {
+        return;
+    }
+
+    const RequestKey request{ message->scope, message->participantId, message->requestId };
+    RequestOutcome prior;
+    const RequestLookup lookup = requestLedger.Lookup(request, &prior);
+    if (lookup == RequestLookup::Replay) {
+        if (prior.accepted && prior.commitId != 0) {
+            SendStoryEventCommand(message->kind, message->participantId, message->requestId, prior.commitId);
+        }
+        return;
+    }
+    if (lookup != RequestLookup::New) {
+        return;
+    }
+
+    const TimelineScope sourceTimeline{ message->linkAge, message->sceneLayer };
+    const PlayerSnapshotMessage& remote = remotePlayerSnapshot.value();
+    const bool sourceMatchesSnapshot = message->scene == remote.scene &&
+                                       IsSameTimeline(sourceTimeline, SnapshotTimelineScope(remote));
+    const bool accepted = sourceMatchesSnapshot && ShouldCoordinateTempleStory(message->kind, true);
+    uint64_t operationEpoch = 0;
+    if (accepted) {
+        applyingAuthoritativeState = true;
+        ReplayTempleStoryPresentation(message->kind);
+        applyingAuthoritativeState = false;
+        operationEpoch = SendStoryEventCommand(message->kind, message->participantId, message->requestId);
+    }
+    requestLedger.Record(request, { accepted, operationEpoch, frameCounter });
+}
+
+void Manager::HandleStoryEventCommand(const Packet& packet) {
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsSaveLoaded()) {
+        return;
+    }
+    const auto message = DecodeStoryEvent(packet.payload);
+    if (!message.has_value() || !IsCurrentScope(message->scope) || message->operationEpoch == 0 ||
+        message->operationEpoch <= lastAppliedStoryOperationEpoch || message->requestId == 0 ||
+        (message->participantId != 1 && message->participantId != 2)) {
+        return;
+    }
+    const TimelineScope sourceTimeline{ message->linkAge, message->sceneLayer };
+    if (!IsValidTimelineScope(sourceTimeline) || message->scene != SCENE_TEMPLE_OF_TIME) {
+        return;
+    }
+    lastAppliedStoryOperationEpoch = message->operationEpoch;
+    if (message->participantId == playerId) {
+        return;
+    }
+    if (gPlayState->sceneNum != message->scene || !IsSameTimeline(GetLocalTimelineScope(), sourceTimeline)) {
+        return;
+    }
+
+    applyingAuthoritativeState = true;
+    ReplayTempleStoryPresentation(message->kind);
+    applyingAuthoritativeState = false;
 }
 
 void Manager::SendHello() {
@@ -2363,8 +2559,9 @@ void Manager::SendPlayerSnapshot() {
     message.entrance = gSaveContext.entranceIndex;
     // A scene can retain an adult skeleton after an unrelated save snapshot writes child age. The live scene
     // value is authoritative for the player model and is the only safe age to advertise to another peer.
-    message.linkAge = gPlayState->linkAgeOnLoad;
-    message.sceneLayer = static_cast<int16_t>(gSaveContext.sceneLayer);
+    const TimelineScope timeline = GetLocalTimelineScope();
+    message.linkAge = timeline.linkAge;
+    message.sceneLayer = timeline.sceneLayer;
     message.position[0] = player->actor.world.pos.x;
     message.position[1] = player->actor.world.pos.y;
     message.position[2] = player->actor.world.pos.z;
@@ -2492,9 +2689,8 @@ void Manager::SendBarrierReady() {
     }
     const BarrierState& state = barrierCoordinator.GetState();
     if (state.phase != BarrierPhase::WaitingForParticipants || !IsCurrentScope(state.scope) ||
-        gPlayState->sceneNum != state.targetScene ||
-        (state.targetRoom >= 0 && gPlayState->roomCtx.curRoom.num != state.targetRoom) ||
-        !IsBarrierTimelineReady(state)) {
+        !BarrierParticipantLocationReady(state, gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
+                                         IsBarrierTimelineReady(state))) {
         return;
     }
     transport.Send(MessageType::BarrierReady,
@@ -2616,6 +2812,44 @@ void Manager::SendGlobalFlagIntent(int16_t flagType, int16_t flag, bool set) {
     message.flag = flag;
     message.set = set;
     transport.Send(MessageType::ProgressionIntent, EncodeProgressionIntent(message));
+}
+
+void Manager::SendStoryEventIntent(StoryEventKind kind) {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Client || !IsSaveLoaded()) {
+        return;
+    }
+    const TimelineScope timeline = GetLocalTimelineScope();
+    StoryEventMessage message;
+    message.scope = sessionScope;
+    message.participantId = playerId;
+    message.requestId = nextRequestId++;
+    message.kind = kind;
+    message.scene = gPlayState->sceneNum;
+    message.linkAge = timeline.linkAge;
+    message.sceneLayer = timeline.sceneLayer;
+    transport.Send(MessageType::StoryEventIntent, EncodeStoryEvent(message));
+}
+
+uint64_t Manager::SendStoryEventCommand(StoryEventKind kind, uint64_t participantId, uint64_t requestId,
+                                        uint64_t operationEpoch) {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Host || !IsSaveLoaded() ||
+        participantId == 0 || requestId == 0) {
+        return 0;
+    }
+    const TimelineScope timeline = GetLocalTimelineScope();
+    StoryEventMessage message;
+    message.scope = sessionScope;
+    message.operationEpoch = operationEpoch == 0 ? nextOperationEpoch++ : operationEpoch;
+    message.participantId = participantId;
+    message.requestId = requestId;
+    message.kind = kind;
+    message.scene = gPlayState->sceneNum;
+    message.linkAge = timeline.linkAge;
+    message.sceneLayer = timeline.sceneLayer;
+    if (!transport.Send(MessageType::StoryEventCommand, EncodeStoryEvent(message))) {
+        return 0;
+    }
+    return message.operationEpoch;
 }
 
 void Manager::SendDekuBabaSnapshot(void* actor, bool alive) {
@@ -3013,28 +3247,9 @@ void Manager::UpdateGenericEnemy(void* actorRef) {
         return;
     }
 
-    Player* player = GET_PLAYER(gPlayState);
-    const bool nativeSwordHit = player != nullptr && player->meleeWeaponState > 0 &&
-                                actor->colChkInfo.health < kGuestEnemyHealthSentinel;
-    if (nativeSwordHit) {
-        // A single sword action can cross several animation substates. Count it once per enemy until the weapon
-        // returns to idle, while still allowing one sweep to hit multiple enemies.
-        if (!genericGuestTargetsHitThisSwing.contains(entityId) && !pendingGuestAttacks.contains(entityId)) {
-            genericGuestTargetsHitThisSwing.insert(entityId);
-            pendingGuestAttacks.insert(entityId);
-            lastGuestAttackTick[entityId] = frameCounter;
-            if (automatedTestEnabled && automatedTestStage == TestGenericCombat) {
-                ++automatedTestPhysicalHits;
-                ReportAutomatedTest("generic-enemy-client-physical-collision",
-                                    "hit=" + std::to_string(automatedTestPhysicalHits));
-            }
-            SendAttackIntent(entityId, gPlayState->sceneNum, 3);
-        }
-    }
-
     // Let each client run the actor's own private action and animation state, then pull common fields back to the
-    // host sample. The sentinel prevents that local simulation from committing a guest-only death before its hit
-    // intent is validated by the host.
+    // host sample. Damage is consumed before the native actor update so a guest collision cannot start a private
+    // fall/death action before the host validates it.
     ApplyGenericEnemySnapshot(actor, snapshot->second);
 }
 
@@ -3065,6 +3280,23 @@ void Manager::ApplyGenericEnemyAuthority(void* actorRef, bool* shouldUpdate) {
         // value would immediately invoke a null update callback on the destroyed actor.
         *shouldUpdate = false;
         return;
+    }
+    Player* player = GET_PLAYER(gPlayState);
+    uint8_t damageEffect = 0;
+    uint8_t damage = 0;
+    const bool localMeleeHit = player != nullptr && player->meleeWeaponState > 0 &&
+                               HyruleCoop_EnFireflyConsumeDamage(actor, &damageEffect, &damage);
+    if (localMeleeHit && !genericGuestTargetsHitThisSwing.contains(entityId) &&
+        !pendingGuestAttacks.contains(entityId)) {
+        genericGuestTargetsHitThisSwing.insert(entityId);
+        pendingGuestAttacks.insert(entityId);
+        lastGuestAttackTick[entityId] = frameCounter;
+        if (automatedTestEnabled && automatedTestStage == TestGenericCombat) {
+            ++automatedTestPhysicalHits;
+            ReportAutomatedTest("generic-enemy-client-physical-collision",
+                                "hit=" + std::to_string(automatedTestPhysicalHits));
+        }
+        SendAttackIntent(entityId, gPlayState->sceneNum, 3, damageEffect, std::max<uint8_t>(damage, 1));
     }
     // Keep the actor's own update and animation running. Its health becomes a short-lived collision probe and is
     // reconciled from the host snapshot immediately after that update.
@@ -3539,6 +3771,28 @@ void Manager::ApplyGohmaAuthority(void* actor, bool* shouldUpdate) {
     }
     const uint64_t entityId = GetGohmaEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
     localGohmas[entityId] = actor;
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot != actorSnapshots.end() && !snapshot->second.alive) {
+        Actor_Kill(static_cast<Actor*>(actor));
+        ClearPendingGuestAttack(entityId);
+        lastGuestAttackTick.erase(entityId);
+        localGohmas.erase(entityId);
+        localGohmaDeathPresentations.erase(entityId);
+        *shouldUpdate = false;
+        return;
+    }
+    if (snapshot != actorSnapshots.end() && snapshot->second.health <= 0 && snapshot->second.stateId == 2) {
+        if (localGohmaDeathPresentations.insert(entityId).second) {
+            ApplyGohmaSnapshot(actor, snapshot->second);
+            SPDLOG_INFO("[HyruleCoop] Starting local Gohma defeat presentation for entity {}", entityId);
+        }
+        ClearPendingGuestAttack(entityId);
+        lastGuestAttackTick.erase(entityId);
+        // Defeat is durable host-owned state, but the camera, audio, decay animation, heart, and warp are a
+        // presentation each peer must advance locally. Reapplying host timer fields would freeze that sequence.
+        *shouldUpdate = true;
+        return;
+    }
     if (ConsumeGohmaHit(actor)) {
         if (automatedTestEnabled && automatedTestStage == TestBossCombat &&
             automatedTestCombatPhase == CombatSecondSwing) {
@@ -3559,17 +3813,9 @@ void Manager::ApplyGohmaAuthority(void* actor, bool* shouldUpdate) {
             SendAttackIntent(entityId, gPlayState->sceneNum, 2);
         }
     }
-    const auto snapshot = actorSnapshots.find(entityId);
     if (snapshot != actorSnapshots.end()) {
-        if (!snapshot->second.alive) {
-            Actor_Kill(static_cast<Actor*>(actor));
-            ClearPendingGuestAttack(entityId);
-            lastGuestAttackTick.erase(entityId);
-            localGohmas.erase(entityId);
-        } else {
-            ApplyGohmaSnapshot(actor, snapshot->second);
-            RegisterGohmaGuestCollision(actor, gPlayState);
-        }
+        ApplyGohmaSnapshot(actor, snapshot->second);
+        RegisterGohmaGuestCollision(actor, gPlayState);
     }
     *shouldUpdate = false;
 }
@@ -3579,6 +3825,7 @@ void Manager::ForgetGohma(void* actor) {
         if (iterator->second == actor) {
             ClearPendingGuestAttack(iterator->first);
             lastGuestAttackTick.erase(iterator->first);
+            localGohmaDeathPresentations.erase(iterator->first);
             iterator = localGohmas.erase(iterator);
         } else {
             ++iterator;
@@ -3731,6 +3978,15 @@ void Manager::CaptureCanonicalProgression() {
 }
 
 void Manager::ApplyCanonicalProgression(const SharedProgressionState& state) {
+    if (transport.GetRole() == SessionRole::Client && !storyPresentationBaselineApplied) {
+        doorOfTimeOpeningPresented =
+            HasSharedEventFlag(state, EVENTCHKINF_OPENED_THE_DOOR_OF_TIME);
+        masterSwordEntrancePresented =
+            HasSharedEventFlag(state, EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER);
+        masterSwordPullPresented =
+            HasSharedEventFlag(state, EVENTCHKINF_PULLED_MASTER_SWORD_FROM_PEDESTAL);
+        storyPresentationBaselineApplied = true;
+    }
     ApplySharedProgression(&gSaveContext, state);
     if (gPlayState != nullptr && Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) &&
         Inventory_HasSpecificBottle(ITEM_LETTER_RUTO)) {
@@ -3767,6 +4023,43 @@ void Manager::ReconcileZorasFountainBombableWall(void* actorRef) {
     }
 }
 
+void Manager::ReconcileDoorOfTime(void* actorRef) {
+    if (!IsSaveLoaded() || actorRef == nullptr || gPlayState->sceneNum != SCENE_TEMPLE_OF_TIME ||
+        !Flags_GetEventChkInf(EVENTCHKINF_OPENED_THE_DOOR_OF_TIME) || Play_InCsMode(gPlayState)) {
+        return;
+    }
+    DemoKankyo* door = static_cast<DemoKankyo*>(actorRef);
+    if (door->actor.params != DEMOKANKYO_DOOR_OF_TIME) {
+        return;
+    }
+    if (handshakeComplete && !doorOfTimeOpeningPresented &&
+        gSaveContext.sceneLayer < SCENE_LAYER_CUTSCENE_FIRST) {
+        doorOfTimeOpeningPresented = true;
+        applyingAuthoritativeState = true;
+        EnOkarinaTag_PlayDoorOfTimeCutscene(nullptr, gPlayState);
+        applyingAuthoritativeState = false;
+        return;
+    }
+    gPlayState->roomCtx.unk_74[1] = 0xFF;
+    if (door->actor.child != nullptr) {
+        Actor_Kill(door->actor.child);
+    }
+    Actor_Kill(&door->actor);
+}
+
+void Manager::ReconcileMasterSwordChamber(void* actorRef) {
+    if (!handshakeComplete || !IsSaveLoaded() || actorRef == nullptr || masterSwordEntrancePresented ||
+        gPlayState->sceneNum != SCENE_TEMPLE_OF_TIME ||
+        !Flags_GetEventChkInf(EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER) ||
+        gSaveContext.sceneLayer >= SCENE_LAYER_CUTSCENE_FIRST || Play_InCsMode(gPlayState)) {
+        return;
+    }
+    masterSwordEntrancePresented = true;
+    applyingAuthoritativeState = true;
+    BgTokiSwd_PlayEntranceCutscene(gPlayState);
+    applyingAuthoritativeState = false;
+}
+
 void Manager::RefreshRemotePlayer() {
     if (!IsSaveLoaded() || !handshakeComplete || !remotePlayerSnapshot.has_value() || remotePlayer != nullptr ||
         preparingRemotePlayer) {
@@ -3780,7 +4073,7 @@ void Manager::RefreshRemotePlayer() {
 
     const PlayerSnapshotMessage& state = remotePlayerSnapshot.value();
     if (!IsRemotePlayerVisibleInRoom(gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num, state.scene,
-                                     state.room, LocalTimelineScope(), SnapshotTimelineScope(state))) {
+                                     state.room, GetLocalTimelineScope(), SnapshotTimelineScope(state))) {
         return;
     }
 
@@ -3832,7 +4125,7 @@ void Manager::DestroyRemotePlayer() {
 
 bool Manager::IsRemoteTimelineCompatible() const {
     return IsSaveLoaded() && remotePlayerSnapshot.has_value() &&
-           IsSameTimeline(LocalTimelineScope(), SnapshotTimelineScope(*remotePlayerSnapshot));
+           IsSameTimeline(GetLocalTimelineScope(), SnapshotTimelineScope(*remotePlayerSnapshot));
 }
 
 bool Manager::PrepareBarrierTimeline(const BarrierState& state) {
@@ -3870,7 +4163,7 @@ bool Manager::IsBarrierTimelineReady(const BarrierState& state) const {
 }
 
 void Manager::PopulateBarrierTimeline(BarrierState& state) const {
-    const TimelineScope timeline = LocalTimelineScope();
+    const TimelineScope timeline = GetLocalTimelineScope();
     state.targetLinkAge = timeline.linkAge;
     state.targetSceneLayer = timeline.sceneLayer;
     state.targetDayTime = gSaveContext.dayTime;
@@ -3879,13 +4172,85 @@ void Manager::PopulateBarrierTimeline(BarrierState& state) const {
     state.targetNight = gSaveContext.nightFlag != 0;
 }
 
-void Manager::BeginCastleEscapeStoryBarrier() {
+void Manager::NotifyLocalStoryEvent(StoryEventKind kind) {
+    if (!ShouldCoordinateTempleStory(kind, false)) {
+        return;
+    }
+    if (transport.GetRole() == SessionRole::Host) {
+        SendStoryEventCommand(kind, playerId, nextRequestId++);
+    } else if (transport.GetRole() == SessionRole::Client) {
+        SendStoryEventIntent(kind);
+    }
+}
+
+void Manager::NotifyMasterSwordPullStarted() {
+    if (applyingAuthoritativeState) {
+        return;
+    }
+    masterSwordPullPresented = true;
+    coordinatedMasterSwordPullActive =
+        handshakeComplete && ShouldCoordinateTempleStory(StoryEventKind::MasterSwordPull, false);
+    if (coordinatedMasterSwordPullActive) {
+        NotifyLocalStoryEvent(StoryEventKind::MasterSwordPull);
+    }
+}
+
+bool Manager::ShouldCoordinateTempleStory(StoryEventKind kind, bool remoteInitiated) const {
+    (void)remoteInitiated;
+    if (!handshakeComplete || !IsSaveLoaded() || !remotePlayerSnapshot.has_value() ||
+        gPlayState->sceneNum != SCENE_TEMPLE_OF_TIME ||
+        (kind != StoryEventKind::DoorOfTimeOpening &&
+         kind != StoryEventKind::MasterSwordChamberEntrance &&
+         kind != StoryEventKind::MasterSwordPull)) {
+        return false;
+    }
+    const PlayerSnapshotMessage& remote = remotePlayerSnapshot.value();
+    return remote.scene == SCENE_TEMPLE_OF_TIME &&
+           IsSameTimeline(GetLocalTimelineScope(), SnapshotTimelineScope(remote));
+}
+
+bool Manager::ShouldReplayTempleStoryPresentation(StoryEventKind kind) const {
+    if (!IsSaveLoaded() || gPlayState->sceneNum != SCENE_TEMPLE_OF_TIME || Play_InCsMode(gPlayState)) {
+        return false;
+    }
+    if (kind == StoryEventKind::MasterSwordChamberEntrance) {
+        return !masterSwordEntrancePresented && gSaveContext.sceneLayer < SCENE_LAYER_CUTSCENE_FIRST;
+    }
+    if (kind == StoryEventKind::MasterSwordPull) {
+        return !masterSwordPullPresented && gPlayState->linkAgeOnLoad == LINK_AGE_CHILD &&
+               gSaveContext.sceneLayer < SCENE_LAYER_CUTSCENE_FIRST;
+    }
+    return kind == StoryEventKind::DoorOfTimeOpening && !doorOfTimeOpeningPresented;
+}
+
+void Manager::ReplayTempleStoryPresentation(StoryEventKind kind) {
+    if (!ShouldReplayTempleStoryPresentation(kind)) {
+        return;
+    }
+    if (kind == StoryEventKind::DoorOfTimeOpening) {
+        doorOfTimeOpeningPresented = true;
+        EnOkarinaTag_PlayDoorOfTimeCutscene(nullptr, gPlayState);
+    } else if (kind == StoryEventKind::MasterSwordChamberEntrance) {
+        masterSwordEntrancePresented = true;
+        BgTokiSwd_PlayEntranceCutscene(gPlayState);
+    } else if (kind == StoryEventKind::MasterSwordPull) {
+        masterSwordPullPresented = true;
+        coordinatedMasterSwordPullActive = true;
+        BgTokiSwd_PlayPullCutscene(gPlayState);
+    }
+}
+
+void Manager::BeginStoryBarrier(StoryEventKind storyEvent) {
     if (!handshakeComplete || transport.GetRole() != SessionRole::Host || !IsSaveLoaded()) {
         return;
     }
-    castleEscapeStoryPending = false;
-    castleEscapeStoryActive = true;
-    castleEscapeCutsceneObserved = false;
+    if (storyEvent != StoryEventKind::CastleEscape) {
+        pendingStoryEvent = StoryEventKind::None;
+        return;
+    }
+    pendingStoryEvent = StoryEventKind::None;
+    activeStoryEvent = storyEvent;
+    storyCutsceneObserved = false;
 
     BarrierState state;
     state.operationEpoch = nextOperationEpoch++;
@@ -3901,7 +4266,7 @@ void Manager::BeginCastleEscapeStoryBarrier() {
     state.deadlineTick = static_cast<uint64_t>(frameCounter) + 1200;
     state.participants = { 1, 2 };
     if (!barrierCoordinator.Begin(state) || !barrierCoordinator.WaitForParticipants()) {
-        castleEscapeStoryActive = false;
+        activeStoryEvent = StoryEventKind::None;
         protocolError = "Could not coordinate Zelda's escape cutscene";
         return;
     }
@@ -3920,17 +4285,18 @@ void Manager::BeginCastleEscapeStoryBarrier() {
 }
 
 void Manager::UpdateStoryEvent() {
-    if (castleEscapeStoryPending && handshakeComplete && transport.GetRole() == SessionRole::Host) {
-        BeginCastleEscapeStoryBarrier();
+    if (pendingStoryEvent != StoryEventKind::None && handshakeComplete &&
+        transport.GetRole() == SessionRole::Host) {
+        BeginStoryBarrier(pendingStoryEvent);
     }
-    if (!castleEscapeStoryActive || gPlayState == nullptr) {
+    if (activeStoryEvent == StoryEventKind::None || gPlayState == nullptr) {
         return;
     }
     const bool cutsceneRunning = gSaveContext.cutsceneIndex >= 0xFFF0 || gPlayState->csCtx.state != CS_STATE_IDLE;
-    castleEscapeCutsceneObserved |= cutsceneRunning;
-    if (castleEscapeCutsceneObserved && !cutsceneRunning) {
-        castleEscapeStoryActive = false;
-        castleEscapeCutsceneObserved = false;
+    storyCutsceneObserved |= cutsceneRunning;
+    if (storyCutsceneObserved && !cutsceneRunning) {
+        activeStoryEvent = StoryEventKind::None;
+        storyCutsceneObserved = false;
     }
 }
 
@@ -3947,7 +4313,7 @@ void Manager::BeginReconnectBarrier() {
     state.targetScene = gPlayState->sceneNum;
     state.targetRoom = -1;
     state.targetEntrance = gSaveContext.entranceIndex;
-    if (castleEscapeStoryActive && gSaveContext.cutsceneIndex >= 0xFFF0) {
+    if (activeStoryEvent != StoryEventKind::None && gSaveContext.cutsceneIndex >= 0xFFF0) {
         state.targetCutsceneIndex = gSaveContext.cutsceneIndex;
     }
     PopulateBarrierTimeline(state);
@@ -4081,12 +4447,33 @@ void Manager::FailAutomatedTest(const std::string& reason) {
     ReportAutomatedTest("FAIL", reason);
 }
 
-void Manager::WarpAutomatedTestToForest() {
-    if (!IsSaveLoaded()) {
+void Manager::BeginAutomatedForestBarrier() {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Host || !IsSaveLoaded()) {
         return;
     }
+
     automatedTestActorSpawned = false;
-    GameInteractor::RawAction::TeleportPlayerSilent(ENTR_KOKIRI_FOREST_0);
+
+    BarrierState state;
+    state.operationEpoch = nextOperationEpoch++;
+    state.scope = sessionScope;
+    state.kind = BarrierKind::SceneTransition;
+    state.phase = BarrierPhase::Prepare;
+    state.manifestHash = HashCapabilities(negotiatedCapabilities);
+    state.targetScene = SCENE_KOKIRI_FOREST;
+    state.targetRoom = -1;
+    // The generic Kokiri entrance can resolve to different streaming rooms while a participant is changing age.
+    // The Deku Tree approach is an unambiguous shared-room rendezvous for the actor/collision proof.
+    state.targetEntrance = ENTR_KOKIRI_FOREST_OUTSIDE_DEKU_TREE;
+    PopulateBarrierTimeline(state);
+    state.deadlineTick = static_cast<uint64_t>(frameCounter) + 1200;
+    state.participants = { 1, 2 };
+    if (!barrierCoordinator.Begin(state) || !barrierCoordinator.WaitForParticipants()) {
+        FailAutomatedTest("could not prepare the Kokiri Forest test barrier");
+        return;
+    }
+    SendBarrierSnapshot();
+    GameInteractor::RawAction::TeleportPlayerSilent(ENTR_KOKIRI_FOREST_OUTSIDE_DEKU_TREE);
 }
 
 bool Manager::SpawnAutomatedTestDekuBaba() {
@@ -4094,12 +4481,32 @@ bool Manager::SpawnAutomatedTestDekuBaba() {
         return false;
     }
     Player* player = GET_PLAYER(gPlayState);
-    const float x = std::round(player->actor.world.pos.x / 10.0f) * 10.0f;
-    const float y = std::round(player->actor.world.pos.y / 10.0f) * 10.0f;
-    const float z = std::round(player->actor.world.pos.z / 10.0f) * 10.0f + 120.0f;
-    Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_DEKUBABA, x, y, z, 0, 0, 0, 0);
+    float x = std::round(player->actor.world.pos.x / 10.0f) * 10.0f;
+    float y = std::round(player->actor.world.pos.y / 10.0f) * 10.0f;
+    float z = std::round(player->actor.world.pos.z / 10.0f) * 10.0f + 120.0f;
+    int16_t params = 0;
+    if (automatedTestClient) {
+        const auto authoritative =
+            std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
+                return entry.second.scene == SCENE_KOKIRI_FOREST && entry.second.actorId == ACTOR_EN_DEKUBABA &&
+                       entry.second.alive;
+            });
+        if (authoritative == actorSnapshots.end()) {
+            return false;
+        }
+        x = authoritative->second.homePosition[0];
+        y = authoritative->second.homePosition[1];
+        z = authoritative->second.homePosition[2];
+        params = authoritative->second.params;
+    }
+    Actor* actor = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_DEKUBABA, x, y, z, 0, 0, 0, params);
     if (actor == nullptr) {
         return false;
+    }
+    if (automatedTestClient) {
+        // Stage from the authoritative actor's exact home transform. Interpolated player coordinates can differ by
+        // one identity unit, which would accidentally test two independent enemies instead of the guest collider.
+        PositionAutomatedTestPlayer(player, actor, 55.0f);
     }
     automatedTestActorSpawned = true;
     return true;
@@ -4153,13 +4560,29 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             ReportAutomatedTest("connection-ready", "initial barrier complete");
-            WarpAutomatedTestToForest();
+            if (!automatedTestClient) {
+                BeginAutomatedForestBarrier();
+            }
             SetAutomatedTestStage(TestAwaitingScene, "warp-requested");
             return;
         case TestAwaitingScene: {
             if (!IsSaveLoaded() || gPlayState->sceneNum != SCENE_KOKIRI_FOREST ||
                 automatedTestTick - automatedTestStageTick < 30) {
                 return;
+            }
+            if (automatedTestClient &&
+                (!remotePlayerSnapshot.has_value() || remotePlayerSnapshot->scene != SCENE_KOKIRI_FOREST)) {
+                return;
+            }
+            if (automatedTestClient) {
+                const auto authoritative =
+                    std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
+                        return entry.second.scene == SCENE_KOKIRI_FOREST &&
+                               entry.second.actorId == ACTOR_EN_DEKUBABA && entry.second.alive;
+                    });
+                if (authoritative == actorSnapshots.end()) {
+                    return;
+                }
             }
             GET_PLAYER(gPlayState)->currentMask = PLAYER_MASK_BUNNY;
             automatedTestRemotePresentationRendered = false;
@@ -4177,7 +4600,9 @@ void Manager::UpdateAutomatedTest() {
             clearEventFlag(EVENTCHKINF_OBTAINED_RUTOS_LETTER);
             clearEventFlag(EVENTCHKINF_KING_ZORA_MOVED);
             clearEventFlag(EVENTCHKINF_OBTAINED_SILVER_SCALE);
+            clearEventFlag(EVENTCHKINF_LEARNED_SONG_OF_TIME);
             clearEventFlag(EVENTCHKINF_OPENED_ZORAS_DOMAIN);
+            gSaveContext.inventory.questItems &= ~(1u << QUEST_SONG_TIME);
             gSaveContext.itemGetInf[ITEMGETINF_0C >> 4] &=
                 static_cast<uint16_t>(~(1u << (ITEMGETINF_0C & 0xF)));
             for (int index = 0; index < 4; ++index) {
@@ -4220,6 +4645,8 @@ void Manager::UpdateAutomatedTest() {
                     static_cast<uint16_t>(1u << (EVENTCHKINF_OBTAINED_RUTOS_LETTER & 0xF));
                 gSaveContext.eventChkInf[EVENTCHKINF_OBTAINED_SILVER_SCALE >> 4] |=
                     static_cast<uint16_t>(1u << (EVENTCHKINF_OBTAINED_SILVER_SCALE & 0xF));
+                gSaveContext.eventChkInf[EVENTCHKINF_LEARNED_SONG_OF_TIME >> 4] |=
+                    static_cast<uint16_t>(1u << (EVENTCHKINF_LEARNED_SONG_OF_TIME & 0xF));
                 gSaveContext.inventory.items[SLOT_BOTTLE_1] = ITEM_BOTTLE;
                 CaptureCanonicalProgression();
                 ++progressionRevision;
@@ -4238,15 +4665,42 @@ void Manager::UpdateAutomatedTest() {
             if (automatedTestTick - automatedTestStageTick < 60) {
                 return;
             }
-            if (!automatedTestActorSpawned || localDekuBabas.empty() || remotePlayer == nullptr ||
+            if ((automatedTestTick - automatedTestStageTick) % 300 == 0) {
+                const TimelineScope localTimeline = GetLocalTimelineScope();
+                const int remoteAge = remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->linkAge : -1;
+                const int remoteLayer = remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->sceneLayer : -1;
+                const int remoteRoom = remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->room : -99;
+                const int remoteMask = remotePlayer == nullptr
+                                           ? -1
+                                           : static_cast<int>(reinterpret_cast<Player*>(remotePlayer)->currentMask);
+                ReportAutomatedTest(
+                    "awaiting-actors-state",
+                    "spawned=" + std::to_string(automatedTestActorSpawned) +
+                        " babas=" + std::to_string(localDekuBabas.size()) +
+                        " actorSnapshots=" + std::to_string(actorSnapshots.size()) +
+                        " remoteActor=" + std::to_string(remotePlayer != nullptr) +
+                        " remoteSnapshot=" + std::to_string(remotePlayerSnapshot.has_value()) +
+                        " localRoom=" + std::to_string(gPlayState->roomCtx.curRoom.num) +
+                        " remoteRoom=" + std::to_string(remoteRoom) +
+                        " localAge=" + std::to_string(localTimeline.linkAge) +
+                        " remoteAge=" + std::to_string(remoteAge) +
+                        " localLayer=" + std::to_string(localTimeline.sceneLayer) +
+                        " remoteLayer=" + std::to_string(remoteLayer) +
+                        " remoteMask=" + std::to_string(remoteMask) +
+                        " draw=" + std::to_string(automatedTestRemotePresentationRendered));
+            }
+            const auto liveDekuBaba =
+                std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
+                    return entry.second.scene == SCENE_KOKIRI_FOREST && entry.second.actorId == ACTOR_EN_DEKUBABA &&
+                           entry.second.alive;
+                });
+            if (!automatedTestActorSpawned || liveDekuBaba == actorSnapshots.end() ||
+                !localDekuBabas.contains(liveDekuBaba->first) || remotePlayer == nullptr ||
                 !remotePlayerSnapshot.has_value() || remotePlayerSnapshot->scene != SCENE_KOKIRI_FOREST) {
                 return;
             }
             if (reinterpret_cast<Player*>(remotePlayer)->currentMask != PLAYER_MASK_BUNNY ||
                 (automatedTestRequireDraw && !automatedTestRemotePresentationRendered)) {
-                return;
-            }
-            if (automatedTestClient && actorSnapshots.empty()) {
                 return;
             }
             ReportAutomatedTest(automatedTestClient ? "bunny-hood-host-applied" : "bunny-hood-client-applied",
@@ -4269,6 +4723,21 @@ void Manager::UpdateAutomatedTest() {
             const auto dead = std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
                 return entry.second.scene == SCENE_KOKIRI_FOREST && !entry.second.alive;
             });
+            if ((automatedTestTick - automatedTestStageTick) % 300 == 0) {
+                const auto live = std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
+                    return entry.second.scene == SCENE_KOKIRI_FOREST && entry.second.alive;
+                });
+                ReportAutomatedTest(
+                    "deku-baba-stage-state",
+                    "phase=" + std::to_string(static_cast<int>(automatedTestCombatPhase)) +
+                        " snapshots=" + std::to_string(actorSnapshots.size()) +
+                        " local=" + std::to_string(localDekuBabas.size()) +
+                        " live=" + std::to_string(live != actorSnapshots.end()) +
+                        " localMatch=" +
+                        std::to_string(live != actorSnapshots.end() && localDekuBabas.contains(live->first)) +
+                        " focus=" + std::to_string(GET_PLAYER(gPlayState)->focusActor != nullptr) +
+                        " target=" + std::to_string(automatedTestTargetActor != nullptr));
+            }
             if (automatedTestClient && automatedTestPhysicalHits > 0 && automatedTestTick % 60 == 0) {
                 const auto live = std::find_if(actorSnapshots.begin(), actorSnapshots.end(), [](const auto& entry) {
                     return entry.second.scene == SCENE_KOKIRI_FOREST && entry.second.alive;
@@ -4470,7 +4939,7 @@ void Manager::UpdateAutomatedTest() {
                 Actor* actor = static_cast<Actor*>(local->second);
                 if (automatedTestCombatPhase == CombatSetup) {
                     EquipAutomatedTestSword(player);
-                    PositionAutomatedTestPlayer(player, actor, 55.0f);
+                    PositionAutomatedTestPlayer(player, actor, 35.0f);
                     Player_ClearZTargeting(player);
                     player->zTargetActiveTimer = 0;
                     automatedTestCombatPhase = CombatAcquireTarget;
@@ -4479,7 +4948,7 @@ void Manager::UpdateAutomatedTest() {
                     return;
                 }
                 if (automatedTestCombatPhase == CombatAcquireTarget) {
-                    PositionAutomatedTestPlayer(player, actor, 55.0f);
+                    PositionAutomatedTestPlayer(player, actor, 35.0f);
                     if (player->focusActor != automatedTestTargetActor) {
                         return;
                     }
@@ -4490,7 +4959,7 @@ void Manager::UpdateAutomatedTest() {
                     return;
                 }
                 if (automatedTestCombatPhase == CombatFirstSwing) {
-                    PositionAutomatedTestPlayer(player, actor, 55.0f);
+                    PositionAutomatedTestPlayer(player, actor, 35.0f);
                     if (player->meleeWeaponState > 0 && !automatedTestSwingObserved) {
                         automatedTestSwingObserved = true;
                         ReportAutomatedTest("generic-enemy-client-sword-state-entered",
@@ -4499,6 +4968,15 @@ void Manager::UpdateAutomatedTest() {
                     if (automatedTestPhysicalHits > 0) {
                         automatedTestCombatPhase = CombatAwaitFirstDamage;
                         automatedTestCombatPhaseTick = static_cast<uint32_t>(automatedTestTick);
+                    } else if (automatedTestTick - automatedTestCombatPhaseTick > 360) {
+                        const float deltaX = player->actor.world.pos.x - actor->world.pos.x;
+                        const float deltaZ = player->actor.world.pos.z - actor->world.pos.z;
+                        FailAutomatedTest(
+                            "guest sword action produced no ordinary-enemy collider contact: meleeState=" +
+                            std::to_string(player->meleeWeaponState) + " meleeAnimation=" +
+                            std::to_string(player->meleeWeaponAnimation) + " focused=" +
+                            std::to_string(player->focusActor == automatedTestTargetActor) + " distance=" +
+                            std::to_string(std::sqrt(deltaX * deltaX + deltaZ * deltaZ)));
                     }
                     return;
                 }
@@ -4520,7 +4998,7 @@ void Manager::UpdateAutomatedTest() {
             Actor* actor = static_cast<Actor*>(local->second);
             if (automatedTestCombatPhase == CombatSetup) {
                 EquipAutomatedTestSword(player);
-                PositionAutomatedTestPlayer(player, actor, 55.0f);
+                PositionAutomatedTestPlayer(player, actor, 35.0f);
                 Player_ClearZTargeting(player);
                 player->zTargetActiveTimer = 0;
                 automatedTestCombatPhase = CombatAcquireTarget;
@@ -4529,7 +5007,7 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             if (automatedTestCombatPhase == CombatAcquireTarget) {
-                PositionAutomatedTestPlayer(player, actor, 55.0f);
+                PositionAutomatedTestPlayer(player, actor, 35.0f);
                 if (player->focusActor != automatedTestTargetActor) {
                     return;
                 }
@@ -4540,11 +5018,21 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             if (automatedTestCombatPhase == CombatFirstSwing) {
-                PositionAutomatedTestPlayer(player, actor, 55.0f);
+                PositionAutomatedTestPlayer(player, actor, 35.0f);
                 if (player->meleeWeaponState > 0 && !automatedTestSwingObserved) {
                     automatedTestSwingObserved = true;
                     ReportAutomatedTest("generic-enemy-host-sword-state-entered",
                                         "Player_Update entered a melee weapon state from B input");
+                }
+                if (automatedTestPhysicalHits == 0 && automatedTestTick - automatedTestCombatPhaseTick > 360) {
+                    const float deltaX = player->actor.world.pos.x - actor->world.pos.x;
+                    const float deltaZ = player->actor.world.pos.z - actor->world.pos.z;
+                    FailAutomatedTest(
+                        "host sword action produced no ordinary-enemy collider contact: meleeState=" +
+                        std::to_string(player->meleeWeaponState) + " meleeAnimation=" +
+                        std::to_string(player->meleeWeaponAnimation) + " focused=" +
+                        std::to_string(player->focusActor == automatedTestTargetActor) + " distance=" +
+                        std::to_string(std::sqrt(deltaX * deltaX + deltaZ * deltaZ)));
                 }
             }
             return;
@@ -4556,13 +5044,21 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             ReportAutomatedTest("collectible-synchronized", std::to_string(collectibleId));
+            automatedTestProgressionRupees = gSaveContext.rupees;
+            automatedTestProgressionArrows = gSaveContext.inventory.ammo[SLOT_BOW];
+            automatedTestProgressionMagic = gSaveContext.magic;
+            automatedTestProgressionResourcesCaptured = true;
             SetAutomatedTestStage(TestAwaitingProgression, "shared-progression-test-started");
             return;
         }
         case TestAwaitingProgression: {
-            const int16_t expectedRupees = automatedTestClient ? 222 : 111;
-            const int8_t expectedArrows = automatedTestClient ? 23 : 7;
-            const int8_t expectedMagic = automatedTestClient ? kAutomatedTestClientMagic : kAutomatedTestHostMagic;
+            if (!automatedTestProgressionResourcesCaptured) {
+                FailAutomatedTest("personal resource baseline was not captured before shared progression");
+                return;
+            }
+            const int16_t expectedRupees = automatedTestProgressionRupees;
+            const int8_t expectedArrows = automatedTestProgressionArrows;
+            const int8_t expectedMagic = automatedTestProgressionMagic;
             if (automatedTestClient && !automatedTestProgressionTriggered) {
                 automatedTestProgressionTriggered = true;
                 Item_Give(gPlayState, ITEM_HOOKSHOT);
@@ -4588,9 +5084,12 @@ void Manager::UpdateAutomatedTest() {
                                                 Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_RUTOS_LETTER) &&
                                                 Flags_GetEventChkInf(EVENTCHKINF_KING_ZORA_MOVED) &&
                                                 Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_SILVER_SCALE) &&
+                                                Flags_GetEventChkInf(EVENTCHKINF_LEARNED_SONG_OF_TIME) &&
+                                                CHECK_QUEST_ITEM(QUEST_SONG_TIME) &&
                                                 !Inventory_HasSpecificBottle(ITEM_LETTER_RUTO);
             if (!durableRewardsRepaired) {
-                FailAutomatedTest("derived bottle, Ruto hand-in, and Silver Scale progression was not repaired");
+                FailAutomatedTest(
+                    "derived bottle, Ruto hand-in, Silver Scale, and Song of Time progression was not repaired");
                 return;
             }
             if (!remotePlayerSnapshot.has_value() ||
@@ -4602,13 +5101,21 @@ void Manager::UpdateAutomatedTest() {
                 gSaveContext.inventory.ammo[SLOT_BOW] != expectedArrows || gSaveContext.magic != expectedMagic ||
                 gSaveContext.magicLevel != 1 || gSaveContext.magicCapacity != MAGIC_NORMAL_METER ||
                 !gSaveContext.isMagicAcquired || gSaveContext.isDoubleMagicAcquired) {
-                FailAutomatedTest("shared progression overwrote a local resource or corrupted the magic meter");
+                FailAutomatedTest(
+                    "shared progression overwrote a local resource or corrupted the magic meter: rupees=" +
+                    std::to_string(gSaveContext.rupees) + "/" + std::to_string(expectedRupees) +
+                    " arrows=" + std::to_string(gSaveContext.inventory.ammo[SLOT_BOW]) + "/" +
+                    std::to_string(expectedArrows) + " magic=" + std::to_string(gSaveContext.magic) + "/" +
+                    std::to_string(expectedMagic) + " level=" + std::to_string(gSaveContext.magicLevel) +
+                    " capacity=" + std::to_string(gSaveContext.magicCapacity) + " acquired=" +
+                    std::to_string(gSaveContext.isMagicAcquired) + " double=" +
+                    std::to_string(gSaveContext.isDoubleMagicAcquired));
                 return;
             }
             ReportAutomatedTest("shared-progression-synchronized",
                                 "Hookshot, Kokiri Sword, and Farore's Wind shared; rupees, arrows, and current magic remained local");
             ReportAutomatedTest("derived-progression-repaired",
-                                "Cucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags");
+                                "Cucco and Ruto bottles, King Zora hand-in, Silver Scale, and Song of Time recovered from durable flags");
             SetAutomatedTestStage(TestAwaitingDungeonRewards, "dungeon-reward-test-started");
             return;
         }
@@ -5148,6 +5655,7 @@ void Manager::UpdateAutomatedTest() {
             automatedTestRemoteSwingRendered = false;
             automatedTestRemoteSwingDrawn = false;
             automatedTestFirstDamageObserved = false;
+            automatedTestBossDeathPresentationObserved = false;
             automatedTestPostDeathCleanupObserved = false;
             automatedTestTargetEntityId = 0;
             automatedTestTargetActor = automatedTestClient ? nullptr : localGohmas.begin()->second;
@@ -5157,6 +5665,16 @@ void Manager::UpdateAutomatedTest() {
         }
         case TestBossCombat: {
             const bool bossClear = (gSaveContext.sceneFlags[SCENE_DEKU_TREE_BOSS].clear & kGohmaRoomMask) != 0;
+            if (!automatedTestBossDeathPresentationObserved && Play_InCsMode(gPlayState)) {
+                const bool defeatedLocally = std::any_of(localGohmas.begin(), localGohmas.end(), [](const auto& entry) {
+                    return entry.second != nullptr && static_cast<Actor*>(entry.second)->colChkInfo.health == 0;
+                });
+                if (defeatedLocally) {
+                    automatedTestBossDeathPresentationObserved = true;
+                    ReportAutomatedTest("gohma-death-presentation-started",
+                                        "native local boss cutscene entered after authoritative defeat");
+                }
+            }
             if (!automatedTestClient) {
                 Player* player = GET_PLAYER(gPlayState);
                 if (!automatedTestBossCompleted && automatedTestTargetActor != nullptr &&
@@ -5202,7 +5720,8 @@ void Manager::UpdateAutomatedTest() {
                 if (!bossClear) {
                     return;
                 }
-                if (automatedTestAcceptedBossHits != 2 || !automatedTestTargetObserved ||
+                if (automatedTestAcceptedBossHits != 2 || !automatedTestBossDeathPresentationObserved ||
+                    !automatedTestTargetObserved ||
                     !automatedTestRemoteMovementObserved ||
                     !automatedTestRemoteTargetObserved || !automatedTestRemoteSwingObserved ||
                     !automatedTestRemoteSwingRendered ||
@@ -5347,9 +5866,13 @@ void Manager::UpdateAutomatedTest() {
             }
             if (automatedTestCombatPhase == CombatVerifyCleanup &&
                 automatedTestTick - automatedTestCombatPhaseTick >= 30) {
+                const auto liveBoss = localGohmas.find(target->first);
+                const bool bossStillDamageable = liveBoss != localGohmas.end() && liveBoss->second != nullptr &&
+                                                 (static_cast<Actor*>(liveBoss->second)->colChkInfo.health > 0 ||
+                                                  CanDamageGohma(liveBoss->second));
                 if (automatedTestPhysicalHits != 2 || pendingGuestAttacks.contains(target->first) ||
-                    player->focusActor == automatedTestTargetActor) {
-                    FailAutomatedTest("post-death target or sword input reached the defeated Gohma collider");
+                    bossStillDamageable) {
+                    FailAutomatedTest("post-death sword input reached the defeated Gohma collider");
                     return;
                 }
                 automatedTestPostDeathCleanupObserved = true;
@@ -5359,7 +5882,8 @@ void Manager::UpdateAutomatedTest() {
             }
             if (bossClear && automatedTestCombatPhase == CombatDone && automatedTestMovementObserved &&
                 automatedTestTargetObserved && automatedTestSwingObserved && automatedTestFirstDamageObserved &&
-                automatedTestPostDeathCleanupObserved && automatedTestPhysicalHits == 2) {
+                automatedTestBossDeathPresentationObserved && automatedTestPostDeathCleanupObserved &&
+                automatedTestPhysicalHits == 2) {
                 ReportAutomatedTest("gohma-defeat-synchronized",
                                     "two physical sword collisions and post-death cleanup verified");
                 SetAutomatedTestStage(TestAwaitingBossCompletion, "boss-progression-test-complete");
@@ -5395,26 +5919,44 @@ void Manager::UpdateAutomatedTest() {
                 return;
             }
             ReportAutomatedTest("guest-save-protection-complete", "pre-join save written unchanged");
-            automatedTestReconnectStarted = true;
             Disconnect();
             // Simulate a stale guest only after disconnect cleanup has restored its local save overlay.
             gSaveContext.sceneFlags[SCENE_KOKIRI_FOREST].collect &= ~collectibleMask;
             gSaveContext.sceneFlags[SCENE_KOKIRI_FOREST].swch &= ~switchMask;
             gSaveContext.sceneFlags[SCENE_DEKU_TREE_BOSS].clear &= ~kGohmaRoomMask;
             GameInteractor::RawAction::UnsetFlag(FLAG_EVENT_CHECK_INF, EVENTCHKINF_KING_ZORA_MOVED);
+            GameInteractor::RawAction::UnsetFlag(FLAG_EVENT_CHECK_INF, EVENTCHKINF_LEARNED_SONG_OF_TIME);
+            gSaveContext.inventory.questItems &= ~(1u << QUEST_SONG_TIME);
             gSaveContext.inventory.items[SLOT_HOOKSHOT] = ITEM_NONE;
             gSaveContext.inventory.items[SLOT_FARORES_WIND] = ITEM_NONE;
             gSaveContext.itemGetInf[ITEMGETINF_18_19_1A_INDEX] &= ~ITEMGETINF_18_MASK;
             gSaveContext.inventory.equipment &=
                 ~OWNED_EQUIP_FLAG(EQUIP_TYPE_SWORD, EQUIP_INV_SWORD_KOKIRI);
-            if (!Join(automatedTestAddress, automatedTestPort, "Local Guest")) {
-                FailAutomatedTest("client reconnect could not start");
-                return;
-            }
-            SetAutomatedTestStage(TestAwaitingReconnect, "client-reconnect-started");
+            automatedTestReconnectStarted = false;
+            // Disconnect() removes the frame hook that advances this automated
+            // stage. Keep only the test manager alive while the stopped
+            // transport settles; Join() will perform its normal hook reset.
+            RegisterHooks(true);
+            SetAutomatedTestStage(TestAwaitingReconnect, "client-reconnect-paused",
+                                  "transport stopped before restart");
             return;
         }
         case TestAwaitingReconnect: {
+            if (automatedTestClient && !automatedTestReconnectStarted) {
+                // Starting a new client in the same update as Stop() can leave the
+                // replacement connection accepted without its handshake worker.
+                // Exercise the normal Join path after teardown has settled.
+                if (automatedTestTick - automatedTestStageTick < 8) {
+                    return;
+                }
+                if (!Join(automatedTestAddress, automatedTestPort, "Local Guest")) {
+                    FailAutomatedTest("client reconnect could not start");
+                    return;
+                }
+                automatedTestReconnectStarted = true;
+                ReportAutomatedTest("client-reconnect-started");
+                return;
+            }
             if (!automatedTestClient && observedConnectionGeneration >= 2) {
                 automatedTestReconnectStarted = true;
             }
@@ -5442,6 +5984,8 @@ void Manager::UpdateAutomatedTest() {
                                     Flags_GetEventChkInf(EVENTCHKINF_OPENED_ZORAS_DOMAIN) &&
                                     Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_RUTOS_LETTER) &&
                                     Flags_GetEventChkInf(EVENTCHKINF_OBTAINED_SILVER_SCALE) &&
+                                    Flags_GetEventChkInf(EVENTCHKINF_LEARNED_SONG_OF_TIME) &&
+                                    CHECK_QUEST_ITEM(QUEST_SONG_TIME) &&
                                     bottleCount >= 2 && CUR_UPG_VALUE(UPG_SCALE) >= 1;
             int16_t expectedRupees = automatedTestHostReconnectRupees;
             int8_t expectedArrows = automatedTestHostReconnectArrows;
@@ -5458,6 +6002,33 @@ void Manager::UpdateAutomatedTest() {
             }
             if (!collected || !dead || !hookshotShared || !faroresWindShared || !swordShared || !bossClear ||
                 !worldState || remotePlayer == nullptr) {
+                const uint64_t ticksInStage = automatedTestTick - automatedTestStageTick;
+                if (ticksInStage >= 60 && ticksInStage % 300 == 0) {
+                    ReportAutomatedTest(
+                        "reconnect-state-pending",
+                        "collected=" + std::to_string(collected) + " dead=" + std::to_string(dead) +
+                            " hookshot=" + std::to_string(hookshotShared) +
+                            " farores=" + std::to_string(faroresWindShared) +
+                            " sword=" + std::to_string(swordShared) + " boss=" + std::to_string(bossClear) +
+                            " world=" + std::to_string(worldState) +
+                            " remote=" + std::to_string(remotePlayer != nullptr) +
+                            " localScene=" + std::to_string(gPlayState != nullptr ? gPlayState->sceneNum : -1) +
+                            " remoteScene=" +
+                            std::to_string(remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->scene : -1) +
+                            " localRoom=" +
+                            std::to_string(gPlayState != nullptr ? gPlayState->roomCtx.curRoom.num : -99) +
+                            " remoteRoom=" +
+                            std::to_string(remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->room : -99) +
+                            " localAge=" + std::to_string(GetLocalTimelineScope().linkAge) +
+                            " remoteAge=" +
+                            std::to_string(remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->linkAge : -1) +
+                            " localLayer=" + std::to_string(GetLocalTimelineScope().sceneLayer) +
+                            " remoteLayer=" +
+                            std::to_string(remotePlayerSnapshot.has_value() ? remotePlayerSnapshot->sceneLayer : -1) +
+                            " preparing=" + std::to_string(preparingRemotePlayer) +
+                            " locations=" + std::to_string(collectedLocations.size()) +
+                            " revision=" + std::to_string(lastAppliedProgressionRevision));
+                }
                 return;
             }
             if (gSaveContext.rupees != expectedRupees ||
@@ -5524,6 +6095,16 @@ void Manager::CaptureSaveOverlay() {
                                    SceneFlagState{ flags.chest, flags.swch, flags.clear, flags.collect });
     }
     originalProgression = CaptureSharedProgression(&gSaveContext);
+    if (transport.GetRole() == SessionRole::Host) {
+        doorOfTimeOpeningPresented =
+            HasSharedEventFlag(originalProgression, EVENTCHKINF_OPENED_THE_DOOR_OF_TIME);
+        masterSwordEntrancePresented =
+            HasSharedEventFlag(originalProgression, EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER);
+        masterSwordPullPresented =
+            HasSharedEventFlag(originalProgression, EVENTCHKINF_PULLED_MASTER_SWORD_FROM_PEDESTAL);
+        storyPresentationBaselineApplied = true;
+    }
+    coordinatedMasterSwordPullActive = false;
     if (transport.GetRole() == SessionRole::Host && !canonicalProgressionCaptured) {
         canonicalProgression = originalProgression;
         canonicalProgressionCaptured = true;
@@ -5564,6 +6145,12 @@ bool Manager::IsSaveLoaded() const {
 }
 
 } // namespace HyruleCoop
+
+extern "C" void HyruleCoop_NotifyMasterSwordPullStarted(void) {
+    if (HyruleCoop::Manager::Instance != nullptr) {
+        HyruleCoop::Manager::Instance->NotifyMasterSwordPullStarted();
+    }
+}
 
 extern "C" int HyruleCoop_ShouldRegisterStalchildAttack(void* actor, int nativeAttackActive) {
     if (HyruleCoop::Manager::Instance == nullptr) {

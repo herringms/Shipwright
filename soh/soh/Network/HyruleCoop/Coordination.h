@@ -118,6 +118,13 @@ enum class BarrierPhase : uint8_t {
     Aborted,
 };
 
+struct BarrierState;
+
+bool BarrierRequiresParticipantRelocation(BarrierKind kind);
+bool BarrierParticipantLocationReady(const BarrierState& state, int16_t currentScene, int16_t currentRoom,
+                                     bool timelineReady);
+bool ClockSnapshotMayApply(bool messageActive, bool ocarinaActive, bool cutsceneActive, bool playerCutsceneActive);
+
 struct BarrierState {
     uint64_t operationEpoch = 0;
     SessionScope scope;

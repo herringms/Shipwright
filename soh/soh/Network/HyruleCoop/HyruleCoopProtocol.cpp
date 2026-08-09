@@ -1080,4 +1080,40 @@ std::optional<ProgressionIntentMessage> DecodeProgressionIntent(const std::vecto
     return message;
 }
 
+std::vector<uint8_t> EncodeStoryEvent(const StoryEventMessage& message) {
+    ByteWriter writer;
+    WriteScope(writer, message.scope);
+    writer.WriteU64(message.operationEpoch);
+    writer.WriteU64(message.participantId);
+    writer.WriteU64(message.requestId);
+    writer.WriteU8(static_cast<uint8_t>(message.kind));
+    writer.WriteU16(static_cast<uint16_t>(message.scene));
+    writer.WriteU32(static_cast<uint32_t>(message.linkAge));
+    writer.WriteU16(static_cast<uint16_t>(message.sceneLayer));
+    return writer.Data();
+}
+
+std::optional<StoryEventMessage> DecodeStoryEvent(const std::vector<uint8_t>& payload) {
+    ByteReader reader(payload);
+    StoryEventMessage message;
+    uint8_t kind = 0;
+    uint16_t signed16 = 0;
+    uint32_t signed32 = 0;
+    if (!ReadScope(reader, message.scope) || !reader.ReadU64(message.operationEpoch) ||
+        !reader.ReadU64(message.participantId) || !reader.ReadU64(message.requestId) ||
+        !reader.ReadU8(kind) || !reader.ReadU16(signed16)) {
+        return std::nullopt;
+    }
+    message.scene = static_cast<int16_t>(signed16);
+    if (!reader.ReadU32(signed32) || !reader.ReadU16(signed16) || !reader.AtEnd() ||
+        kind <= static_cast<uint8_t>(StoryEventKind::None) ||
+        kind > static_cast<uint8_t>(StoryEventKind::CastleEscape)) {
+        return std::nullopt;
+    }
+    message.linkAge = static_cast<int32_t>(signed32);
+    message.sceneLayer = static_cast<int16_t>(signed16);
+    message.kind = static_cast<StoryEventKind>(kind);
+    return message;
+}
+
 } // namespace HyruleCoop

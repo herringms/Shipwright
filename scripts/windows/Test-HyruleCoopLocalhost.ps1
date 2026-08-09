@@ -244,7 +244,7 @@ $requiredHostEvidence = @(
     'host\tstalchild-bystander-survived\t',
     'host\tstalchild-dead-synchronized\t',
     'host\tstalchild-dawn-retired\thost population removed on both peers',
-    'host\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags',
+    'host\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, Silver Scale, and Song of Time recovered from durable flags',
     'host\tdungeon-rewards-map-reconciled\tJabu fixed-layout map chest restored canonical map ownership',
     'host\tdungeon-rewards-synchronized\tboth Jabu map and compass bits converged through the host snapshot',
     'host\ttemporary-scene-state-synchronized\ttemporary switch, collectible, and room clear replayed across peers',
@@ -255,6 +255,7 @@ $requiredHostEvidence = @(
     'host\tgohma-host-target-acquired\t',
     'host\tgohma-host-damage-accepted\thit=1 health=1',
     'host\tgohma-host-damage-accepted\thit=2 health=0',
+    'host\tgohma-death-presentation-started\t',
     'host\tgohma-host-target-released\t',
     'host\thost-campaign-save-complete\t'
 )
@@ -286,7 +287,7 @@ $requiredClientEvidence = @(
     'client\tstalchild-bystander-survived\t',
     'client\tstalchild-dead-synchronized\t',
     'client\tstalchild-dawn-retired\thost population removed on both peers',
-    'client\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, and Silver Scale recovered from durable flags',
+    'client\tderived-progression-repaired\tCucco and Ruto bottles, King Zora hand-in, Silver Scale, and Song of Time recovered from durable flags',
     'client\tdungeon-rewards-compass-intent-sent\tguest Item_Give\(ITEM_COMPASS\) used mapIndex=Jabu',
     'client\tdungeon-rewards-synchronized\tboth Jabu map and compass bits converged through the host snapshot',
     'client\ttemporary-scene-state-synchronized\ttemporary switch, collectible, and room clear replayed across peers',
@@ -296,6 +297,7 @@ $requiredClientEvidence = @(
     'client\tgohma-physical-sword-collision\thit=1',
     'client\tgohma-physical-sword-collision\thit=2',
     'client\tgohma-first-damage-synchronized\thealth=2 -> health=1',
+    'client\tgohma-death-presentation-started\t',
     'client\tgohma-death-cleanup-visible\t',
     'client\tgohma-post-death-attack-rejected\t',
     'client\tguest-save-protection-complete\t'
@@ -421,8 +423,10 @@ $switchMask = [Convert]::ToUInt32("80000000", 16)
 if ([int]$hostData.inventory.items[9] -eq 255 -or [int]$hostData.inventory.items[11] -eq 255 -or
     [int]$hostData.inventory.items[18] -eq 255 -or [int]$hostData.inventory.items[19] -eq 255 -or
     (([uint32]$hostData.inventory.upgrades -band 0xE00) -lt 0x200) -or
+    (([uint32]$hostData.inventory.questItems -band (1 -shl 16)) -eq 0) -or
     (([uint16]$hostData.itemGetInf[0] -band 0x1000) -eq 0) -or
     (([uint16]$hostData.eventChkInf[3] -band 0x030A) -ne 0x030A) -or
+    (([uint16]$hostData.eventChkInf[10] -band 0x0200) -eq 0) -or
     (([uint32]$hostData.sceneFlags[$forestScene].collect -band $collectibleMask) -eq 0) -or
     (([uint32]$hostData.sceneFlags[$forestScene].swch -band $switchMask) -eq 0) -or
     [int]$hostData.rupees -ne $expectedHostRupees -or

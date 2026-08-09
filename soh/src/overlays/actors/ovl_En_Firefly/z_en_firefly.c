@@ -670,6 +670,18 @@ void EnFirefly_UpdateDamage(EnFirefly* this, PlayState* play) {
     }
 }
 
+int HyruleCoop_EnFireflyConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage) {
+    EnFirefly* this = (EnFirefly*)actorRef;
+    if (this == NULL || damageEffect == NULL || damage == NULL || !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+
+    this->collider.base.acFlags &= ~AC_HIT;
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    return *damageEffect != 0 || *damage != 0;
+}
+
 void EnFirefly_Update(Actor* thisx, PlayState* play2) {
     EnFirefly* this = (EnFirefly*)thisx;
     PlayState* play = play2;

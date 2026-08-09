@@ -24,6 +24,37 @@ extern CutsceneData D_808BB2F0[];
 extern CutsceneData D_808BB7A0[];
 extern CutsceneData D_808BBD90[];
 
+void HyruleCoop_NotifyMasterSwordPullStarted(void);
+
+s32 BgTokiSwd_PlayEntranceCutscene(PlayState* play) {
+    if (play == NULL || !GameInteractor_Should(VB_PLAY_ENTRANCE_CS, true, EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER,
+                               gSaveContext.entranceIndex)) {
+        return false;
+    }
+
+    play->csCtx.segment = D_808BBD90;
+    gSaveContext.cutsceneTrigger = 1;
+    return true;
+}
+
+s32 BgTokiSwd_PlayPullCutscene(PlayState* play) {
+    if (play == NULL) {
+        return false;
+    }
+
+    HyruleCoop_NotifyMasterSwordPullStarted();
+
+    if (GameInteractor_Should(VB_GIVE_ITEM_MASTER_SWORD, true)) {
+        Item_Give(play, ITEM_SWORD_MASTER);
+    }
+    play->csCtx.segment = D_808BB2F0;
+    Entrance_SetEntranceDiscovered(ENTR_HYRULE_FIELD_10, false);
+    Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | NA_BGM_STOP);
+    Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | NA_BGM_MASTER_SWORD);
+    gSaveContext.cutsceneTrigger = 1;
+    return true;
+}
+
 const ActorInit Bg_Toki_Swd_InitVars = {
     ACTOR_BG_TOKI_SWD,
     ACTORCAT_PROP,
@@ -117,32 +148,22 @@ void func_808BAF40(BgTokiSwd* this, PlayState* play) {
     if (((Flags_GetEventChkInf(EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER)) == 0) && (gSaveContext.sceneLayer < 4) &&
         Actor_IsFacingAndNearPlayer(&this->actor, 800.0f, 0x7530) && !Play_InCsMode(play)) {
         Flags_SetEventChkInf(EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER);
-        if (GameInteractor_Should(VB_PLAY_ENTRANCE_CS, true, EVENTCHKINF_ENTERED_MASTER_SWORD_CHAMBER,
-                                  gSaveContext.entranceIndex)) {
-            play->csCtx.segment = D_808BBD90;
-            gSaveContext.cutsceneTrigger = 1;
-        }
+        BgTokiSwd_PlayEntranceCutscene(play);
     }
 
     if (!LINK_IS_ADULT || (Flags_GetEventChkInf(EVENTCHKINF_LEARNED_PRELUDE_OF_LIGHT) && !IS_RANDO) || IS_RANDO) {
         if (Actor_HasParent(&this->actor, play)) {
             if (!LINK_IS_ADULT) {
-                if (GameInteractor_Should(VB_GIVE_ITEM_MASTER_SWORD, true)) {
-                    Item_Give(play, ITEM_SWORD_MASTER);
-                }
-                play->csCtx.segment = D_808BB2F0;
-
-                // Discover adult spawn
-                Entrance_SetEntranceDiscovered(ENTR_HYRULE_FIELD_10, false);
+                BgTokiSwd_PlayPullCutscene(play);
             } else {
                 play->csCtx.segment = D_808BB7A0;
 
                 // Discover child spawn
                 Entrance_SetEntranceDiscovered(ENTR_LINKS_HOUSE_CHILD_SPAWN, false);
+                Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | NA_BGM_STOP);
+                Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | NA_BGM_MASTER_SWORD);
+                gSaveContext.cutsceneTrigger = 1;
             }
-            Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | NA_BGM_STOP);
-            Audio_QueueSeqCmd(SEQ_PLAYER_BGM_MAIN << 24 | NA_BGM_MASTER_SWORD);
-            gSaveContext.cutsceneTrigger = 1;
             this->actor.parent = NULL;
             BgTokiSwd_SetupAction(this, func_808BB0AC);
         } else {

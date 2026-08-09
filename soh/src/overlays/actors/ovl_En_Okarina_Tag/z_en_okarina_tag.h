@@ -20,4 +20,6 @@ typedef struct EnOkarinaTag {
     /* 0x015C */ f32 interactRange;
 } EnOkarinaTag; // size = 0x0160
 
+s32 EnOkarinaTag_PlayDoorOfTimeCutscene(EnOkarinaTag* tag, PlayState* play);
+
 #endif

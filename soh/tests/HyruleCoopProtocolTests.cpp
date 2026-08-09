@@ -327,6 +327,27 @@ static void TestActorSnapshot() {
 }
 
 static void TestCoordinationMessages() {
+    assert(!BarrierRequiresParticipantRelocation(BarrierKind::ReconnectSnapshot));
+    assert(BarrierRequiresParticipantRelocation(BarrierKind::SceneTransition));
+    assert(BarrierRequiresParticipantRelocation(BarrierKind::StoryEvent));
+    BarrierState reconnectState;
+    reconnectState.kind = BarrierKind::ReconnectSnapshot;
+    reconnectState.targetScene = 2;
+    reconnectState.targetRoom = 3;
+    assert(BarrierParticipantLocationReady(reconnectState, 99, 7, false));
+    BarrierState storyState;
+    storyState.kind = BarrierKind::StoryEvent;
+    storyState.targetScene = 2;
+    storyState.targetRoom = 3;
+    assert(!BarrierParticipantLocationReady(storyState, 99, 7, true));
+    assert(!BarrierParticipantLocationReady(storyState, 2, 3, false));
+    assert(BarrierParticipantLocationReady(storyState, 2, 3, true));
+    assert(ClockSnapshotMayApply(false, false, false, false));
+    assert(!ClockSnapshotMayApply(true, false, false, false));
+    assert(!ClockSnapshotMayApply(false, true, false, false));
+    assert(!ClockSnapshotMayApply(false, false, true, false));
+    assert(!ClockSnapshotMayApply(false, false, false, true));
+
     BarrierState state;
     state.operationEpoch = 20;
     state.scope = { 90, 4 };
@@ -439,6 +460,33 @@ static void TestCoordinationMessages() {
     assert(decodedGlobalFlagIntent->flagType == 5);
     assert(decodedGlobalFlagIntent->flag == 0x33);
     assert(decodedGlobalFlagIntent->set);
+
+    StoryEventMessage story;
+    story.scope = { 90, 4 };
+    story.operationEpoch = 33;
+    story.participantId = 2;
+    story.requestId = 91;
+    story.kind = StoryEventKind::MasterSwordPull;
+    story.scene = 0x43;
+    story.linkAge = 1;
+    story.sceneLayer = 0;
+    const auto decodedStory = DecodeStoryEvent(EncodeStoryEvent(story));
+    assert(decodedStory.has_value());
+    assert(decodedStory->scope == story.scope);
+    assert(decodedStory->operationEpoch == story.operationEpoch);
+    assert(decodedStory->participantId == story.participantId);
+    assert(decodedStory->requestId == story.requestId);
+    assert(decodedStory->kind == StoryEventKind::MasterSwordPull);
+    assert(decodedStory->scene == story.scene);
+    assert(decodedStory->linkAge == story.linkAge);
+    assert(decodedStory->sceneLayer == story.sceneLayer);
+
+    story.kind = StoryEventKind::None;
+    assert(!DecodeStoryEvent(EncodeStoryEvent(story)).has_value());
+    story.kind = StoryEventKind::DoorOfTimeOpening;
+    std::vector<uint8_t> truncatedStory = EncodeStoryEvent(story);
+    truncatedStory.pop_back();
+    assert(!DecodeStoryEvent(truncatedStory).has_value());
 }
 
 static void TestInvalidPacket() {

@@ -39,6 +39,16 @@ const ActorInit En_Okarina_Tag_InitVars = {
 extern CutsceneData D_80ABF9D0[];
 extern CutsceneData D_80ABFB40[];
 
+s32 EnOkarinaTag_PlayDoorOfTimeCutscene(EnOkarinaTag* this, PlayState* play) {
+    if (play == NULL || !GameInteractor_Should(VB_PLAY_DOOR_OF_TIME_CS, true, this)) {
+        return false;
+    }
+
+    play->csCtx.segment = D_80ABFB40;
+    gSaveContext.cutsceneTrigger = 1;
+    return true;
+}
+
 void EnOkarinaTag_Destroy(Actor* thisx, PlayState* play) {
 }
 
@@ -255,10 +265,7 @@ void func_80ABF4C8(EnOkarinaTag* this, PlayState* play) {
                 Audio_SetMainBgmTempoFreqAfterFanfare(1.18921f, 0x5A);
                 break;
             case 4: // Door of Time
-                if (GameInteractor_Should(VB_PLAY_DOOR_OF_TIME_CS, true, this)) {
-                    play->csCtx.segment = D_80ABFB40;
-                    gSaveContext.cutsceneTrigger = 1;
-                }
+                EnOkarinaTag_PlayDoorOfTimeCutscene(this, play);
                 break;
             case 6: // Royal Family Tomb
                 if (GameInteractor_Should(VB_PLAY_ROYAL_FAMILY_TOMB_CS, true, this)) {
