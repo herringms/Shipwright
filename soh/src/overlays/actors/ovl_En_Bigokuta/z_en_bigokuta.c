@@ -2,7 +2,6 @@
 #include "objects/object_bigokuta/object_bigokuta.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Network/HyruleCoop/JabuActorBridge.h"
-#include "soh/ResourceManagerHelpers.h"
 
 #define FLAGS                                                                                 \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_HOSTILE | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -261,8 +260,6 @@ void EnBigokuta_Destroy(Actor* thisx, PlayState* play) {
     for (i = 0; i < ARRAY_COUNT(this->cylinder); i++) {
         Collider_DestroyCylinder(play, &this->cylinder[i]);
     }
-
-    ResourceMgr_UnregisterSkeleton(&this->skelAnime);
 }
 
 void func_809BCE3C(EnBigokuta* this) {
