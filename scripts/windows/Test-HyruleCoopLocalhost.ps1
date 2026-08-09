@@ -405,6 +405,17 @@ $guestSave.sections.base.data.magicLevel = $guestData.magicLevel
 $guestSave.sections.base.data.equips.buttonItems[0] = $guestData.equips.buttonItems[0]
 $guestSave.sections.base.data.equips.equipment = $guestData.equips.equipment
 $guestSave.sections.base.data.inventory.equipment = $guestData.inventory.equipment
+$expectedRandomizerInf = @($guestSave.sections.base.data.randomizerInf)
+$savedRandomizerInf = @($guestData.randomizerInf)
+if ($savedRandomizerInf.Count -gt $expectedRandomizerInf.Count) {
+    for ($index = $expectedRandomizerInf.Count; $index -lt $savedRandomizerInf.Count; $index++) {
+        if ([int]$savedRandomizerInf[$index] -ne 0) {
+            throw "Guest save migration initialized a new randomizerInf slot with non-default data."
+        }
+        $expectedRandomizerInf += [int]$savedRandomizerInf[$index]
+    }
+    $guestSave.sections.base.data.randomizerInf = $expectedRandomizerInf
+}
 $normalizedGuestData = $guestSave.sections.base.data | ConvertTo-Json -Depth 100 -Compress
 $savedGuestData = $guestData | ConvertTo-Json -Depth 100 -Compress
 $hostResourceMatch = [regex]::Match(
