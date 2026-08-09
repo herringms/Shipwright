@@ -50,12 +50,15 @@ class Manager {
     bool SanitizeSaveCopy(void* saveContext) const;
     void PrepareRemotePlayer(void* actor);
     void NotifyRemotePlayerDestroyed(void* actor);
+    void PrepareRemoteHorse(void* actor);
+    void NotifyRemoteHorseDestroyed(void* actor);
     void NotifyRemotePlayerPoseApplied(bool meleeActive);
     void NotifyRemotePlayerDrawApplied(bool meleeActive, uint8_t currentMask);
     void NotifyRemotePlayerMapPositionRead(int16_t scene);
     void NotifyMasterSwordPullStarted();
     bool ShouldRegisterStalchildAttack(void* actor, bool nativeAttackActive) const;
     bool ShouldProcessStalchildHit(void* actor, void* attacker);
+    bool ShouldSuppressSharedEnemyLocalReward(void* actor) const;
 
   private:
     void RegisterHooks(bool enabled);
@@ -76,9 +79,11 @@ class Manager {
     void HandleBarrierSnapshot(const Packet& packet);
     void HandleBarrierReady(const Packet& packet);
     void HandleAttackIntent(const Packet& packet);
+    void HandleActorInteractionIntent(const Packet& packet);
     void HandleCollectibleIntent(const Packet& packet);
     void HandleProgressionSnapshot(const Packet& packet);
     void HandleProgressionIntent(const Packet& packet);
+    void ReconcileClientDurableProgression();
     void HandleStoryEventIntent(const Packet& packet);
     void HandleStoryEventCommand(const Packet& packet);
     void SendHello();
@@ -92,8 +97,10 @@ class Manager {
     void SendBarrierSnapshot();
     void SendBarrierReady();
     void SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackKind, uint8_t damageEffect = 0,
-                          uint8_t damage = 1);
+                          uint8_t damage = 1, uint32_t damageFlags = 0);
     void ClearPendingGuestAttack(uint64_t entityId);
+    void SendActorInteractionIntent(uint64_t entityId, int16_t scene, ActorInteractionKind kind, float value = 0.0f);
+    void ClearPendingActorInteraction(uint64_t entityId);
     void SendCollectibleIntent(int16_t scene, int16_t flagType, int16_t flag);
     void SendProgressionSnapshot();
     void SendProgressionItemIntent(uint16_t itemId, uint16_t modIndex, uint16_t mapIndex);
@@ -105,6 +112,7 @@ class Manager {
     void SendDekuBabaSnapshot(void* actor, bool alive);
     void SendGohmaSnapshot(void* actor, bool alive);
     void SendGenericEnemySnapshot(void* actor, bool alive);
+    void SendSharedCombatEnemySnapshot(void* actor, bool alive, uint64_t acknowledgedRequestId = 0);
     void ApplyStalchildSpawnerAuthority(void* actor, bool* shouldUpdate);
     void HandleStalchildInitialized(void* actor);
     void SendStalchildSnapshot(void* actor, bool alive);
@@ -132,17 +140,30 @@ class Manager {
     void UpdateGenericEnemy(void* actor);
     void ApplyGenericEnemyAuthority(void* actor, bool* shouldUpdate);
     void ForgetGenericEnemy(void* actor);
+    void UpdateSharedCombatEnemy(void* actor);
+    void ApplySharedCombatEnemyAuthority(void* actor, bool* shouldUpdate);
+    void ForgetSharedCombatEnemy(void* actor);
+    void UpdatePushBlock(void* actor);
+    void ForgetPushBlock(void* actor);
+    void UpdateDampeRaceActor(void* actor);
+    void ForgetDampeRaceActor(void* actor);
+    void SendPushBlockSnapshot(void* actor, uint64_t acknowledgedRequestId = 0);
+    void SendDampeRaceSnapshot(void* actor, uint64_t acknowledgedRequestId = 0);
     void UpdateGenericGuestAttack();
     void UpdateTransportTelemetry();
     void InjectAutomatedTestInput(void* actor, bool* shouldUpdate);
     void RefreshRemotePlayer();
     void ReclaimRemotePlayerActor();
     void DestroyRemotePlayer();
+    void RefreshRemoteHorse();
+    void ReclaimRemoteHorseActor();
+    void DestroyRemoteHorse();
+    void ReconcileAuthoritativeSceneActor(void* actor);
     bool IsRemoteTimelineCompatible() const;
     bool PrepareBarrierTimeline(const BarrierState& state);
     bool IsBarrierTimelineReady(const BarrierState& state) const;
     void PopulateBarrierTimeline(BarrierState& state) const;
-    void BeginReconnectBarrier();
+    void BeginHandshakeBarrier();
     void NotifyLocalStoryEvent(StoryEventKind kind);
     bool ShouldCoordinateTempleStory(StoryEventKind kind, bool remoteInitiated) const;
     bool ShouldReplayTempleStoryPresentation(StoryEventKind kind) const;
@@ -206,6 +227,8 @@ class Manager {
     int16_t lastRemoteMeleeScene = -1;
     void* remotePlayer = nullptr;
     bool preparingRemotePlayer = false;
+    void* remoteHorse = nullptr;
+    bool preparingRemoteHorse = false;
     int16_t loadedSceneLayer = -1;
     bool applyingAuthoritativeState = false;
     uint64_t nextRequestId = 1;
@@ -214,6 +237,7 @@ class Manager {
     DomainRevisionTracker appliedSceneRevisions;
     RequestLedger requestLedger;
     BarrierCoordinator barrierCoordinator;
+    BarrierKind pendingHandshakeBarrierKind = BarrierKind::ReconnectSnapshot;
     uint64_t progressionRevision = 0;
     uint64_t lastAppliedProgressionRevision = 0;
     std::unordered_map<uint64_t, CollectedLocation> collectedLocations;
@@ -230,13 +254,29 @@ class Manager {
     SharedProgressionState originalProgression;
     SharedProgressionState canonicalProgression;
     bool canonicalProgressionCaptured = false;
+    SharedProgressionState lastObservedClientProgression;
+    bool clientProgressionBaselineCaptured = false;
+    std::unordered_set<uint16_t> pendingClientEventFlags;
     std::unordered_set<uint64_t> pendingGuestAttacks;
     std::unordered_map<uint64_t, uint64_t> pendingGuestAttackRequests;
     std::unordered_map<uint64_t, uint32_t> lastGuestAttackTick;
+    std::unordered_map<uint64_t, uint64_t> pendingActorInteractionRequests;
+    std::unordered_map<uint64_t, uint32_t> lastActorInteractionTick;
     std::unordered_map<uint64_t, void*> localDekuBabas;
     std::unordered_map<uint64_t, void*> localGohmas;
     std::unordered_set<uint64_t> localGohmaDeathPresentations;
     std::unordered_map<uint64_t, void*> localGenericEnemies;
+    struct SharedCombatEnemyOutcome {
+        uint32_t sequence = 0;
+        uint8_t damageEffect = 0;
+        uint8_t damage = 0;
+        uint32_t damageFlags = 0;
+    };
+    std::unordered_map<uint64_t, void*> localSharedCombatEnemies;
+    std::unordered_map<uint64_t, SharedCombatEnemyOutcome> sharedCombatEnemyOutcomes;
+    std::unordered_map<uint64_t, uint32_t> appliedSharedCombatEnemyOutcomeSequences;
+    std::unordered_map<uint64_t, void*> localPushBlocks;
+    std::unordered_map<uint64_t, void*> localDampeRaceActors;
     std::unordered_map<uint64_t, void*> localJabuActors;
     std::unordered_map<uint64_t, void*> localBarinadeActors;
     std::unordered_map<uint64_t, void*> localStalchildren;

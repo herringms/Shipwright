@@ -60,6 +60,11 @@ static void TestDomainRevisions() {
 }
 
 static void TestBarrierCoordinator() {
+    assert(HandshakeBarrierKind(false) == BarrierKind::SessionPreparation);
+    assert(BarrierRequiresParticipantRelocation(HandshakeBarrierKind(false)));
+    assert(HandshakeBarrierKind(true) == BarrierKind::ReconnectSnapshot);
+    assert(!BarrierRequiresParticipantRelocation(HandshakeBarrierKind(true)));
+
     BarrierCoordinator coordinator;
     BarrierState operation;
     operation.operationEpoch = 33;

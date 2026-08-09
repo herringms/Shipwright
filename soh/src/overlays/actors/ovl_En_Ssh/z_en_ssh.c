@@ -1,4 +1,5 @@
 #include "z_en_ssh.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 #include "objects/object_ssh/object_ssh.h"
 #include "soh/OTRGlobals.h"
 
@@ -546,6 +547,72 @@ s32 EnSsh_CollisionCheck(EnSsh* this, PlayState* play) {
         return EnSsh_CheckHitBack(this, play);
         // Always returns false
     }
+}
+
+static int EnSsh_GetCoopDamage(const EnSsh* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    uint32_t flags = 0;
+    int hit = 0;
+    int i;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        (this->colCylinder[2].base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    for (i = 0; i < 2; ++i) {
+        const ColliderCylinder* cyl = &this->colCylinder[i];
+        if (cyl->base.acFlags & AC_HIT) {
+            hit = 1;
+            if (cyl->info.acHitInfo != NULL) {
+                flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+            }
+        }
+    }
+    if (!hit) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = flags;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnSshPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnSsh_GetCoopDamage((const EnSsh*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnSshConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnSsh* this = (EnSsh*)actorRef;
+    if (this == NULL) {
+        return 0;
+    }
+    if (this->colCylinder[2].base.acFlags & AC_HIT) {
+        this->colCylinder[2].base.acFlags &= ~AC_HIT;
+        this->colCylinder[0].base.acFlags &= ~AC_HIT;
+        this->colCylinder[1].base.acFlags &= ~AC_HIT;
+        return 0;
+    }
+    if (!EnSsh_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->colCylinder[0].base.acFlags &= ~AC_HIT;
+    this->colCylinder[1].base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnSshApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                 uint32_t damageFlags) {
+    EnSsh* this = (EnSsh*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (this == NULL || play == NULL || (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->colCylinder[2].base.acFlags &= ~AC_HIT;
+    this->colCylinder[0].base.acFlags |= AC_HIT;
+    EnSsh_CollisionCheck(this, play);
+    return 1;
 }
 
 void EnSsh_SetBodyCylinderAC(EnSsh* this, PlayState* play) {

@@ -4,15 +4,20 @@
 #include "RemotePlayerRoomPolicy.h"
 #include "soh/Enhancements/nametag.h"
 
+#include <algorithm>
+
 extern "C" {
 #include "functions.h"
 #include "macros.h"
+#include "objects/object_horse/object_horse.h"
+#include "src/overlays/actors/ovl_En_Horse/z_en_horse.h"
 #include "variables.h"
 
 extern PlayState* gPlayState;
 
 void Player_UseItem(PlayState* play, Player* player, s32 item);
 void Player_Draw(Actor* actor, PlayState* play);
+void EnHorse_Draw(Actor* actor, PlayState* play);
 }
 
 namespace {
@@ -29,6 +34,56 @@ bool GetState(const HyruleCoop::PlayerSnapshotMessage*& state) {
     }
     state = HyruleCoop::Manager::Instance->GetRemotePlayerSnapshot();
     return state != nullptr;
+}
+
+bool IsVisibleInCurrentRoom(const HyruleCoop::PlayerSnapshotMessage& state) {
+    return gPlayState != nullptr &&
+           HyruleCoop::IsRemotePlayerVisibleInRoom(
+               gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num, state.scene, state.room,
+               HyruleCoop::Manager::Instance != nullptr
+                   ? HyruleCoop::Manager::Instance->GetLocalTimelineScope()
+                   : HyruleCoop::TimelineScope{ gPlayState->linkAgeOnLoad,
+                                                 static_cast<int16_t>(gSaveContext.sceneLayer) },
+               { state.linkAge, state.sceneLayer });
+}
+
+AnimationHeader* RemoteHorseAnimation(int8_t index) {
+    static const char* const animations[] = {
+        gEponaIdleAnim,      gEponaWhinnyAnim,   gEponaRefuseAnim,
+        gEponaRearingAnim,   gEponaWalkingAnim,  gEponaTrottingAnim,
+        gEponaGallopingAnim, gEponaJumpingAnim,  gEponaJumpingHighAnim,
+    };
+    constexpr int8_t kAnimationCount = static_cast<int8_t>(sizeof(animations) / sizeof(animations[0]));
+    const int8_t normalized = std::clamp(index, static_cast<int8_t>(0), static_cast<int8_t>(kAnimationCount - 1));
+    return reinterpret_cast<AnimationHeader*>(const_cast<char*>(animations[normalized]));
+}
+
+SkeletonHeader* RemoteHorseSkeleton() {
+    return reinterpret_cast<SkeletonHeader*>(const_cast<char*>(gEponaSkel));
+}
+
+void ApplyRemoteHorsePose(EnHorse* horse, const HyruleCoop::PlayerSnapshotMessage& state) {
+    Actor* actor = &horse->actor;
+    actor->world.pos = { state.horsePosition[0], state.horsePosition[1], state.horsePosition[2] };
+    actor->prevPos = actor->world.pos;
+    CopyVec3s(actor->world.rot, state.horseRotation);
+    CopyVec3s(actor->shape.rot, state.horseRotation);
+    actor->speedXZ = state.horseSpeed;
+    actor->focus.pos = actor->world.pos;
+    actor->focus.pos.y += 70.0f;
+
+    const int8_t animation = std::clamp(state.horseAnimation, static_cast<int8_t>(0), static_cast<int8_t>(8));
+    AnimationHeader* animationHeader = RemoteHorseAnimation(animation);
+    if (horse->animationIdx != animation) {
+        Animation_Change(&horse->skin.skelAnime, animationHeader, 1.0f, 0.0f,
+                         Animation_GetLastFrame(animationHeader), ANIMMODE_LOOP, 0.0f);
+        horse->animationIdx = animation;
+    }
+    const float lastFrame = static_cast<float>(Animation_GetLastFrame(animationHeader));
+    horse->skin.skelAnime.playSpeed = 0.0f;
+    horse->skin.skelAnime.curFrame = std::clamp(state.horseAnimationFrame, 0.0f, lastFrame);
+    horse->curFrame = horse->skin.skelAnime.curFrame;
+    horse->stateFlags &= ~ENHORSE_INACTIVE;
 }
 
 } // namespace
@@ -103,13 +158,7 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
         Actor_Kill(actor);
         return;
     }
-    if (!HyruleCoop::IsRemotePlayerVisibleInRoom(
-            gPlayState->sceneNum, activeRoom, state->scene, state->room,
-            HyruleCoop::Manager::Instance != nullptr
-                ? HyruleCoop::Manager::Instance->GetLocalTimelineScope()
-                : HyruleCoop::TimelineScope{ gPlayState->linkAgeOnLoad,
-                                             static_cast<int16_t>(gSaveContext.sceneLayer) },
-            { state->linkAge, state->sceneLayer })) {
+    if (!IsVisibleInCurrentRoom(*state)) {
         actor->shape.shadowAlpha = 0;
         actor->world.pos = { -9999.0f, -9999.0f, -9999.0f };
         return;
@@ -161,15 +210,7 @@ extern "C" void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState*) {
 
 extern "C" void HyruleCoopRemotePlayer_Draw(Actor* actor, PlayState* play) {
     const HyruleCoop::PlayerSnapshotMessage* state = nullptr;
-    if (!GetState(state) || gPlayState == nullptr ||
-        !HyruleCoop::IsRemotePlayerVisibleInRoom(gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num,
-                                                  state->scene, state->room,
-                                                  HyruleCoop::Manager::Instance != nullptr
-                                                      ? HyruleCoop::Manager::Instance->GetLocalTimelineScope()
-                                                      : HyruleCoop::TimelineScope{
-                                                            gPlayState->linkAgeOnLoad,
-                                                            static_cast<int16_t>(gSaveContext.sceneLayer) },
-                                                  { state->linkAge, state->sceneLayer })) {
+    if (!GetState(state) || !IsVisibleInCurrentRoom(*state)) {
         return;
     }
 
@@ -202,4 +243,62 @@ extern "C" void HyruleCoopRemotePlayer_Destroy(Actor* actor, PlayState* play) {
         HyruleCoop::Manager::Instance->NotifyRemotePlayerDestroyed(actor);
     }
     actor->id = ACTOR_PLAYER;
+}
+
+extern "C" void HyruleCoopRemoteHorse_Init(Actor* actor, PlayState* play) {
+    const HyruleCoop::PlayerSnapshotMessage* state = nullptr;
+    if (!GetState(state) || !state->mounted) {
+        Actor_Kill(actor);
+        return;
+    }
+
+    EnHorse* horse = reinterpret_cast<EnHorse*>(actor);
+    // Do not call EnHorse_Init. Its gameplay initializer intentionally removes Epona in scenes where the viewer's
+    // local save, age, or time of day does not allow a horse. This actor is only a remote render projection.
+    Actor_SetScale(actor, 0.01f);
+    actor->gravity = -3.5f;
+    ActorShape_Init(&actor->shape, 0.0f, ActorShadow_DrawHorse, 20.0f);
+    horse->type = HORSE_EPONA;
+    horse->animationIdx = ENHORSE_ANIM_IDLE;
+    horse->stateFlags = ENHORSE_FLAG_7;
+    horse->postDrawFunc = nullptr;
+    Skin_Init(play, &horse->skin, RemoteHorseSkeleton(), RemoteHorseAnimation(ENHORSE_ANIM_IDLE));
+    horse->skin.skelAnime.playSpeed = 0.0f;
+    actor->room = play->roomCtx.curRoom.num;
+    actor->flags |= ACTOR_FLAG_LOCK_ON_DISABLED | ACTOR_FLAG_UPDATE_CULLING_DISABLED | ACTOR_FLAG_DRAW_CULLING_DISABLED;
+    horse->rider = nullptr;
+    actor->child = nullptr;
+    actor->update = HyruleCoopRemoteHorse_Update;
+    actor->draw = HyruleCoopRemoteHorse_Draw;
+    actor->destroy = HyruleCoopRemoteHorse_Destroy;
+    ApplyRemoteHorsePose(horse, *state);
+}
+
+extern "C" void HyruleCoopRemoteHorse_Update(Actor* actor, PlayState*) {
+    const HyruleCoop::PlayerSnapshotMessage* state = nullptr;
+    if (!GetState(state) || !state->mounted || !IsVisibleInCurrentRoom(*state)) {
+        if (HyruleCoop::Manager::Instance != nullptr) {
+            HyruleCoop::Manager::Instance->NotifyRemoteHorseDestroyed(actor);
+        }
+        Actor_Kill(actor);
+        return;
+    }
+
+    ApplyRemoteHorsePose(reinterpret_cast<EnHorse*>(actor), *state);
+}
+
+extern "C" void HyruleCoopRemoteHorse_Draw(Actor* actor, PlayState* play) {
+    const HyruleCoop::PlayerSnapshotMessage* state = nullptr;
+    if (!GetState(state) || !state->mounted || !IsVisibleInCurrentRoom(*state)) {
+        return;
+    }
+
+    EnHorse_Draw(actor, play);
+}
+
+extern "C" void HyruleCoopRemoteHorse_Destroy(Actor* actor, PlayState* play) {
+    Skin_Free(play, &reinterpret_cast<EnHorse*>(actor)->skin);
+    if (HyruleCoop::Manager::Instance != nullptr) {
+        HyruleCoop::Manager::Instance->NotifyRemoteHorseDestroyed(actor);
+    }
 }

@@ -5,6 +5,7 @@
  */
 
 #include "z_en_bb.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 #include "objects/gameplay_keep/gameplay_keep.h"
 #include "objects/object_Bb/object_Bb.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
@@ -494,7 +495,9 @@ void EnBb_Death(EnBb* this, PlayState* play) {
         if (!BodyBreak_SpawnParts(&this->actor, &this->bodyBreak, play, enpartType)) {
             return;
         }
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        }
     } else {
         if (this->flamePrimAlpha) {
             if (this->flamePrimAlpha <= 20) {
@@ -1221,6 +1224,47 @@ void EnBb_CollisionCheck(EnBb* this, PlayState* play) {
                 break;
         }
     }
+}
+
+static int EnBb_GetCoopDamage(const EnBb* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = this->collider.elements[0].info.acHitInfo != NULL
+                       ? this->collider.elements[0].info.acHitInfo->toucher.dmgFlags
+                       : 0;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnBbPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnBb_GetCoopDamage((const EnBb*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnBbConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnBb* this = (EnBb*)actorRef;
+    if (!EnBb_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->collider.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnBbApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags) {
+    EnBb* this = (EnBb*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 || (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->collider.base.acFlags |= AC_HIT;
+    EnBb_CollisionCheck(this, play);
+    return 1;
 }
 
 void EnBb_Update(Actor* thisx, PlayState* play2) {

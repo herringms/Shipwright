@@ -929,6 +929,13 @@ void Minimap_Draw(PlayState* play) {
                         Minimap_DrawCompassIcons(play); // Draw icons for the player spawn and current position
                         Gfx_SetupDL_39Overlay(play->state.gfxCtx);
                         MapMark_Draw(play);
+                    } else {
+                        float remoteX;
+                        float remoteZ;
+                        s16 remoteYaw;
+                        if (HyruleCoop_GetRemotePlayerMapPosition(play->sceneNum, &remoteX, &remoteZ, &remoteYaw)) {
+                            Minimap_DrawCompassIcons(play);
+                        }
                     }
                 }
 

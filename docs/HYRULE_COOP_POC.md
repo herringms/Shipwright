@@ -29,8 +29,9 @@ An engine-independent architectural test executes that entire sequence, includin
 ## Authority and ordering
 
 - Players own their movement and animation streams.
-- The host owns time, enemy and boss AI, enemy and boss health, durable and live temporary scene flags, and progression
-  commits.
+- The host owns time, committed enemy and boss health/death, durable and live temporary scene flags, and progression
+  commits. Specialized encounters may also use host-only AI; newer shared-enemy adapters retain local movement and
+  targeting while routing damage and rewards through the host.
 - Guests send intents; they do not publish committed gameplay state.
 - Request identity is `(sessionEpoch, worldGeneration, participantId, requestId)`.
 - Scene flags, progression, and actors have independent revisions or keyed streams.
@@ -107,7 +108,7 @@ packets by 25 ms, and reversing each surviving packet pair. Both instances verif
 `PASS`. The harness is dormant unless `HYRULE_COOP_TEST_ROLE` is explicitly set.
 
 Verified host and client executables must have identical generated fingerprints and negotiate the explicit
-`hyrule-coop-poc.3` compatibility ID with protocol version 10 in addition to Shipwright's upstream commit. Release
+`hyrule-coop-poc.3` compatibility ID with protocol version 13 in addition to Shipwright's upstream commit. Release
 tooling records the exact executable and package hashes for each published build.
 The PoC build pins its own OneDrive directory for offline availability instead of rejecting the path by name. No
 installed Ship of Harkinian or 2Ship files are modified by this branch.
@@ -120,18 +121,19 @@ installed Ship of Harkinian or 2Ship files are modified by this branch.
   they share the same upstream Git commit
 - Authenticated pairing, encryption, NAT traversal, and invite services
 - Generic synchronization for every actor, puzzle, cutscene, and boss beyond the specialized Deku Baba, Stalchild,
-  and Gohma adapters plus the explicitly allowlisted Keese baseline
+  Gohma, ReDead/Gibdo, Moblin, Blue Bubble, Stalfos, Skulltula, Gold Skulltula, and Skulltula Father adapters plus the
+  explicitly allowlisted Keese baseline. The newer enemy adapters share authoritative damage, death, and rewards;
+  their local movement and target selection are not yet host-owned.
 - Carried world actors and their player attachments, including canonical shared pots and participant-local traversal
   Cuccos whose remote carry proxies do not replace either player's interactive Cucco
 - Complete Deku Baba hit reactions, temporary pruning, drops, and regrowth beyond the synthetic permanent-death proof
-- Host-owned durable world-event flags, beginning with `EVENTCHKINF_OPENED_ZORAS_DOMAIN`, with immediate loaded-actor
-  reconciliation and reconnect replay
-- Same-scene minimap markers using existing Shipwright rendering hooks
+- Comprehensive immediate loaded-actor reconciliation for every durable event. The current explicit set covers the
+  Zora waterfall, King Zora, Mido, the royal tomb, and Song of Time blocks.
 - Host-committed shared recovery and ammunition pickup effects while current health and ammunition balances remain
   participant-local
 - One-time finder notifications for unique durable pickups, without replay during snapshot or reconnect reconciliation
-- Bottle ownership independent of peer-local slot positions, with local ordinary contents and notified host-owned quest
-  content transitions such as Ruto's Letter
+- A complete participant-local ownership model for every personal consumable or temporary item beyond rupees,
+  ammunition, current health and magic, and ordinary bottle contents.
 - Broader host-save coverage for progression domains not yet represented by a co-op adapter
 - MM player, enemy, quest, and Song of Time behavior adapters
 - Player-count difficulty scaling

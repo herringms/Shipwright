@@ -12,7 +12,7 @@
 namespace HyruleCoop {
 
 constexpr uint32_t kPacketMagic = 0x48434F50; // HCOP
-constexpr uint16_t kProtocolVersion = 11;
+constexpr uint16_t kProtocolVersion = 13;
 constexpr size_t kHeaderSize = 24;
 constexpr uint32_t kMaximumPayloadSize = 1024 * 1024;
 constexpr size_t kMaximumActorAdapterWords = 64;
@@ -42,6 +42,7 @@ enum class MessageType : uint16_t {
     PlayerPresentation = 17,
     StoryEventIntent = 18,
     StoryEventCommand = 19,
+    ActorInteractionIntent = 20,
 };
 
 struct Packet {
@@ -158,6 +159,12 @@ struct PlayerSnapshotMessage {
     int16_t focusActorId = -1;
     int8_t meleeWeaponState = 0;
     int8_t meleeWeaponAnimation = 0;
+    bool mounted = false;
+    float horsePosition[3] = {};
+    int16_t horseRotation[3] = {};
+    int8_t horseAnimation = 0;
+    float horseAnimationFrame = 0.0f;
+    float horseSpeed = 0.0f;
 };
 
 struct PlayerPresentationMessage {
@@ -264,6 +271,23 @@ struct AttackIntentMessage {
     uint8_t attackKind = 0;
     uint8_t damageEffect = 0;
     uint8_t damage = 1;
+    uint32_t damageFlags = 0;
+};
+
+enum class ActorInteractionKind : uint8_t {
+    PushBlockBegin = 1,
+    DampeRaceStart = 2,
+};
+
+struct ActorInteractionIntentMessage {
+    SessionScope scope;
+    uint64_t participantId = 0;
+    uint64_t requestId = 0;
+    uint64_t entityId = 0;
+    uint32_t playerTick = 0;
+    int16_t scene = -1;
+    ActorInteractionKind kind = ActorInteractionKind::PushBlockBegin;
+    float value = 0.0f;
 };
 
 struct CollectibleIntentMessage {
@@ -377,6 +401,8 @@ std::vector<uint8_t> EncodeBarrierReady(const BarrierReadyMessage& message);
 std::optional<BarrierReadyMessage> DecodeBarrierReady(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodeAttackIntent(const AttackIntentMessage& message);
 std::optional<AttackIntentMessage> DecodeAttackIntent(const std::vector<uint8_t>& payload);
+std::vector<uint8_t> EncodeActorInteractionIntent(const ActorInteractionIntentMessage& message);
+std::optional<ActorInteractionIntentMessage> DecodeActorInteractionIntent(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodeCollectibleIntent(const CollectibleIntentMessage& message);
 std::optional<CollectibleIntentMessage> DecodeCollectibleIntent(const std::vector<uint8_t>& payload);
 std::vector<uint8_t> EncodeProgressionSnapshot(const ProgressionSnapshotMessage& message);

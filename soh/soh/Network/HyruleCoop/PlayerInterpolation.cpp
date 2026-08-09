@@ -131,6 +131,14 @@ PlayerSnapshotMessage PlayerSnapshotInterpolator::Interpolate(const PlayerSnapsh
     }
     result.modelBlend = Lerp(from.modelBlend, to.modelBlend, amount);
     result.linearVelocity = Lerp(from.linearVelocity, to.linearVelocity, amount);
+    if (from.mounted && to.mounted) {
+        for (size_t axis = 0; axis < 3; ++axis) {
+            result.horsePosition[axis] = Lerp(from.horsePosition[axis], to.horsePosition[axis], amount);
+            result.horseRotation[axis] = LerpAngle(from.horseRotation[axis], to.horseRotation[axis], amount);
+        }
+        result.horseAnimationFrame = Lerp(from.horseAnimationFrame, to.horseAnimationFrame, amount);
+        result.horseSpeed = Lerp(from.horseSpeed, to.horseSpeed, amount);
+    }
     return result;
 }
 

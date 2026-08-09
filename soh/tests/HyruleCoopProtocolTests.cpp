@@ -1,5 +1,6 @@
 #include "soh/Network/HyruleCoop/HyruleCoopProtocol.h"
 #include "soh/Network/HyruleCoop/RemotePlayerRoomPolicy.h"
+#include "soh/Network/HyruleCoop/SharedEnemyCombatPolicy.h"
 #include "soh/Network/HyruleCoop/StalchildPolicy.h"
 
 #include <array>
@@ -106,6 +107,13 @@ static void TestPlayerSnapshot() {
     player.focusActorId = 27;
     player.meleeWeaponState = 1;
     player.meleeWeaponAnimation = 12;
+    player.mounted = true;
+    player.horsePosition[0] = 19.25f;
+    player.horsePosition[1] = -42.0f;
+    player.horseRotation[1] = -4321;
+    player.horseAnimation = 6;
+    player.horseAnimationFrame = 12.5f;
+    player.horseSpeed = 11.75f;
 
     const auto decoded = DecodePlayerSnapshot(EncodePlayerSnapshot(player));
     assert(decoded.has_value());
@@ -129,6 +137,13 @@ static void TestPlayerSnapshot() {
     assert(decoded->focusActorId == player.focusActorId);
     assert(decoded->meleeWeaponState == player.meleeWeaponState);
     assert(decoded->meleeWeaponAnimation == player.meleeWeaponAnimation);
+    assert(decoded->mounted == player.mounted);
+    assert(decoded->horsePosition[0] == player.horsePosition[0]);
+    assert(decoded->horsePosition[1] == player.horsePosition[1]);
+    assert(decoded->horseRotation[1] == player.horseRotation[1]);
+    assert(decoded->horseAnimation == player.horseAnimation);
+    assert(decoded->horseAnimationFrame == player.horseAnimationFrame);
+    assert(decoded->horseSpeed == player.horseSpeed);
 
     std::vector<uint8_t> truncated = EncodePlayerSnapshot(player);
     truncated.pop_back();
@@ -326,7 +341,89 @@ static void TestActorSnapshot() {
     assert(!DecodeActorSnapshot(truncated).has_value());
 }
 
+static void TestSharedEnemyAdapterContracts() {
+    constexpr uint8_t kSharedCombatAttackKind = 6;
+    uint64_t priorEntityId = 0;
+
+    for (size_t index = 0; index < kSharedEnemyAdapterContracts.size(); ++index) {
+        const SharedEnemyAdapterContract& contract = kSharedEnemyAdapterContracts[index];
+        const SharedEnemyAdapterContract* found = FindSharedEnemyAdapterContract(contract.actorId);
+        assert(found != nullptr);
+        assert(found->family == contract.family);
+        assert(SupportsGuestPhysicalDamageIntent(found));
+        assert(PreservesNativeSharedEnemySimulation(found));
+
+        // A host applies each accepted outcome exactly once. A replayed or stale
+        // outcome cannot apply native damage a second time on the guest.
+        const uint32_t sequence = static_cast<uint32_t>(index + 1);
+        assert(ShouldApplySharedEnemyHostOutcome(0, sequence));
+        assert(!ShouldApplySharedEnemyHostOutcome(sequence, sequence));
+        assert(!ShouldApplySharedEnemyHostOutcome(sequence, sequence - 1));
+        assert(ShouldApplySharedEnemyHostOutcome(sequence, sequence + 1));
+
+        if (contract.nativeOutcome == SharedEnemyNativeOutcome::Death) {
+            assert(ShouldSuppressGuestSharedEnemyDrop(found, true));
+            assert(ShouldSuppressGuestSharedEnemyDefeatHook(found, true));
+        } else {
+            // Skulltula Father is natively stunned, not killed, so it has no
+            // duplicate death reward to suppress.
+            assert(!ShouldSuppressGuestSharedEnemyDrop(found, true));
+            assert(!ShouldSuppressGuestSharedEnemyDefeatHook(found, true));
+        }
+        assert(!ShouldSuppressGuestSharedEnemyDrop(found, false));
+        assert(!ShouldSuppressGuestSharedEnemyDefeatHook(found, false));
+
+        const uint64_t entityId = 0x5A00000000000000ULL + static_cast<uint64_t>(index + 1);
+        if (priorEntityId != 0) {
+            assert(AreIndependentSharedEnemyEntities(priorEntityId, entityId));
+        }
+        priorEntityId = entityId;
+
+        AttackIntentMessage intent;
+        intent.scope = { 44, 2 };
+        intent.requestId = entityId;
+        intent.entityId = entityId;
+        intent.scene = 6;
+        intent.attackKind = kSharedCombatAttackKind;
+        intent.damageEffect = 2;
+        intent.damage = 1;
+        intent.damageFlags = 0xA0000000U | static_cast<uint32_t>(index);
+        const auto decodedIntent = DecodeAttackIntent(EncodeAttackIntent(intent));
+        assert(decodedIntent.has_value());
+        assert(decodedIntent->attackKind == kSharedCombatAttackKind);
+        assert(decodedIntent->entityId == entityId);
+        assert(decodedIntent->damageFlags == intent.damageFlags);
+
+        ActorSnapshotMessage outcome;
+        outcome.scope = intent.scope;
+        outcome.entityId = entityId;
+        outcome.scene = intent.scene;
+        outcome.actorId = contract.actorId;
+        outcome.health = contract.nativeOutcome == SharedEnemyNativeOutcome::Death ? 0 : 1;
+        outcome.alive = contract.nativeOutcome != SharedEnemyNativeOutcome::Death;
+        outcome.adapterWordCount = 6;
+        outcome.adapterState[0] = static_cast<int16_t>(sequence & 0xFFFF);
+        outcome.adapterState[1] = static_cast<int16_t>(sequence >> 16);
+        outcome.adapterState[2] = intent.damageEffect;
+        outcome.adapterState[3] = intent.damage;
+        outcome.adapterState[4] = static_cast<int16_t>(intent.damageFlags & 0xFFFF);
+        outcome.adapterState[5] = static_cast<int16_t>(intent.damageFlags >> 16);
+        const auto decodedOutcome = DecodeActorSnapshot(EncodeActorSnapshot(outcome));
+        assert(decodedOutcome.has_value());
+        assert(decodedOutcome->actorId == contract.actorId);
+        assert(decodedOutcome->entityId == entityId);
+        assert(decodedOutcome->adapterWordCount == 6);
+        assert(decodedOutcome->adapterState == outcome.adapterState);
+    }
+
+    assert(FindSharedEnemyAdapterContract(-1) == nullptr);
+    assert(!AreIndependentSharedEnemyEntities(0, 1));
+    assert(!AreIndependentSharedEnemyEntities(7, 7));
+}
+
 static void TestCoordinationMessages() {
+    assert(HandshakeBarrierKind(false) == BarrierKind::SessionPreparation);
+    assert(HandshakeBarrierKind(true) == BarrierKind::ReconnectSnapshot);
     assert(!BarrierRequiresParticipantRelocation(BarrierKind::ReconnectSnapshot));
     assert(BarrierRequiresParticipantRelocation(BarrierKind::SceneTransition));
     assert(BarrierRequiresParticipantRelocation(BarrierKind::StoryEvent));
@@ -387,12 +484,18 @@ static void TestCoordinationMessages() {
     assert(decodedReady->participantId == 2);
 
     AttackIntentMessage attack{ { 90, 4 }, 2, 88, 0x12345678, 300, 17, 1, 15, 2 };
+    attack.damageFlags = 0x001F820;
     const auto decodedAttack = DecodeAttackIntent(EncodeAttackIntent(attack));
     assert(decodedAttack.has_value());
     assert(decodedAttack->requestId == 88);
     assert(decodedAttack->entityId == 0x12345678);
     assert(decodedAttack->damageEffect == 15);
     assert(decodedAttack->damage == 2);
+    assert(decodedAttack->damageFlags == attack.damageFlags);
+
+    std::vector<uint8_t> truncatedAttack = EncodeAttackIntent(attack);
+    truncatedAttack.pop_back();
+    assert(!DecodeAttackIntent(truncatedAttack).has_value());
 
     CollectibleIntentMessage collectible{ { 90, 4 }, 2, 89, 0x9988, 17, 3, 12 };
     const auto decodedCollectible = DecodeCollectibleIntent(EncodeCollectibleIntent(collectible));
@@ -506,6 +609,35 @@ static void TestInvalidPacket() {
     assert(error == "unsupported protocol version");
 }
 
+static void TestActorInteractionIntent() {
+    ActorInteractionIntentMessage source;
+    source.scope = { 77, 4 };
+    source.participantId = 2;
+    source.requestId = 991;
+    source.entityId = 0x1122334455667788ULL;
+    source.playerTick = 1200;
+    source.scene = 3;
+    source.kind = ActorInteractionKind::PushBlockBegin;
+    source.value = -1.0f;
+    const auto decoded = DecodeActorInteractionIntent(EncodeActorInteractionIntent(source));
+    assert(decoded.has_value());
+    assert(decoded->scope == source.scope);
+    assert(decoded->participantId == source.participantId);
+    assert(decoded->requestId == source.requestId);
+    assert(decoded->entityId == source.entityId);
+    assert(decoded->playerTick == source.playerTick);
+    assert(decoded->scene == source.scene);
+    assert(decoded->kind == source.kind);
+    assert(decoded->value == source.value);
+
+    source.kind = ActorInteractionKind::DampeRaceStart;
+    assert(DecodeActorInteractionIntent(EncodeActorInteractionIntent(source))->kind ==
+           ActorInteractionKind::DampeRaceStart);
+    std::vector<uint8_t> truncated = EncodeActorInteractionIntent(source);
+    truncated.pop_back();
+    assert(!DecodeActorInteractionIntent(truncated).has_value());
+}
+
 static void TestDynamicStalchildLifecycle() {
     DynamicStalchildIdentityRegistry identities;
     const int hostActorOne = 1;
@@ -593,7 +725,9 @@ int main() {
     TestCycleSnapshot();
     TestWorldStateMessages();
     TestActorSnapshot();
+    TestSharedEnemyAdapterContracts();
     TestCoordinationMessages();
+    TestActorInteractionIntent();
     TestInvalidPacket();
     TestDynamicStalchildLifecycle();
     std::cout << "HyruleCoop protocol tests passed\n";

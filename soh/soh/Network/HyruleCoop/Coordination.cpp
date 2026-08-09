@@ -87,6 +87,10 @@ bool BarrierRequiresParticipantRelocation(BarrierKind kind) {
     return kind != BarrierKind::ReconnectSnapshot;
 }
 
+BarrierKind HandshakeBarrierKind(bool requestedCurrentSession) {
+    return requestedCurrentSession ? BarrierKind::ReconnectSnapshot : BarrierKind::SessionPreparation;
+}
+
 bool BarrierParticipantLocationReady(const BarrierState& state, int16_t currentScene, int16_t currentRoom,
                                      bool timelineReady) {
     if (!BarrierRequiresParticipantRelocation(state.kind)) {

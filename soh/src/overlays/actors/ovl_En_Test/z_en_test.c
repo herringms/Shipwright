@@ -5,6 +5,7 @@
  */
 
 #include "z_en_test.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 #include "objects/object_sk2/object_sk2.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
@@ -1522,14 +1523,18 @@ void func_80862E6C(EnTest* this, PlayState* play) {
             EnTest_SetupJumpBack(this);
         } else if ((this->actor.params == STALFOS_TYPE_5) &&
                    !Actor_FindNearby(play, &this->actor, ACTOR_EN_TEST, ACTORCAT_ENEMY, 8000.0f)) {
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+            }
 
             if (this->actor.parent != NULL) {
                 this->actor.parent->home.rot.z--;
             }
 
             Actor_Kill(&this->actor);
-            GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+            }
         }
     }
 }
@@ -1631,14 +1636,18 @@ void func_808633E8(EnTest* this, PlayState* play) {
     this->actor.params = STALFOS_TYPE_1;
 
     if (BodyBreak_SpawnParts(&this->actor, &this->bodyBreak, play, this->actor.params)) {
-        Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xD0);
+        }
 
         if (this->actor.parent != NULL) {
             this->actor.parent->home.rot.z--;
         }
 
         Actor_Kill(&this->actor);
-        GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+        }
     }
 }
 
@@ -1700,6 +1709,54 @@ void EnTest_UpdateDamage(EnTest* this, PlayState* play) {
             }
         }
     }
+}
+
+static int EnTest_GetCoopDamage(const EnTest* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        !(this->bodyCollider.base.acFlags & AC_HIT) || (this->shieldCollider.base.acFlags & AC_BOUNCED)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = this->bodyCollider.info.acHitInfo != NULL ? this->bodyCollider.info.acHitInfo->toucher.dmgFlags : 0;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnTestPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnTest_GetCoopDamage((const EnTest*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnTestConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnTest* this = (EnTest*)actorRef;
+    if (this == NULL) {
+        return 0;
+    }
+    if (this->shieldCollider.base.acFlags & AC_BOUNCED) {
+        this->shieldCollider.base.acFlags &= ~AC_BOUNCED;
+        this->bodyCollider.base.acFlags &= ~AC_HIT;
+        return 0;
+    }
+    if (!EnTest_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->bodyCollider.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnTestApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                  uint32_t damageFlags) {
+    EnTest* this = (EnTest*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 || (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->shieldCollider.base.acFlags &= ~AC_BOUNCED;
+    this->bodyCollider.base.acFlags |= AC_HIT;
+    EnTest_UpdateDamage(this, play);
+    return 1;
 }
 
 void EnTest_Update(Actor* thisx, PlayState* play) {

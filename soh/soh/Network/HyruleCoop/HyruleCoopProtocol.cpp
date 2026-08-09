@@ -341,6 +341,16 @@ std::vector<uint8_t> EncodePlayerSnapshot(const PlayerSnapshotMessage& message) 
     writer.WriteU16(static_cast<uint16_t>(message.focusActorId));
     writer.WriteU8(static_cast<uint8_t>(message.meleeWeaponState));
     writer.WriteU8(static_cast<uint8_t>(message.meleeWeaponAnimation));
+    writer.WriteU8(message.mounted ? 1 : 0);
+    for (float value : message.horsePosition) {
+        writer.WriteF32(value);
+    }
+    for (int16_t value : message.horseRotation) {
+        writer.WriteU16(static_cast<uint16_t>(value));
+    }
+    writer.WriteU8(static_cast<uint8_t>(message.horseAnimation));
+    writer.WriteF32(message.horseAnimationFrame);
+    writer.WriteF32(message.horseSpeed);
     return writer.Data();
 }
 
@@ -449,6 +459,28 @@ std::optional<PlayerSnapshotMessage> DecodePlayerSnapshot(const std::vector<uint
         return std::nullopt;
     }
     message.meleeWeaponAnimation = static_cast<int8_t>(signed8);
+    if (!reader.ReadU8(signed8) || signed8 > 1) {
+        return std::nullopt;
+    }
+    message.mounted = signed8 != 0;
+    for (float& value : message.horsePosition) {
+        if (!reader.ReadF32(value)) {
+            return std::nullopt;
+        }
+    }
+    for (int16_t& value : message.horseRotation) {
+        if (!reader.ReadU16(signed16)) {
+            return std::nullopt;
+        }
+        value = static_cast<int16_t>(signed16);
+    }
+    if (!reader.ReadU8(signed8)) {
+        return std::nullopt;
+    }
+    message.horseAnimation = static_cast<int8_t>(signed8);
+    if (!reader.ReadF32(message.horseAnimationFrame) || !reader.ReadF32(message.horseSpeed)) {
+        return std::nullopt;
+    }
     return reader.AtEnd() ? std::optional<PlayerSnapshotMessage>(message) : std::nullopt;
 }
 
@@ -872,6 +904,7 @@ std::vector<uint8_t> EncodeAttackIntent(const AttackIntentMessage& message) {
     writer.WriteU8(message.attackKind);
     writer.WriteU8(message.damageEffect);
     writer.WriteU8(message.damage);
+    writer.WriteU32(message.damageFlags);
     return writer.Data();
 }
 
@@ -882,10 +915,42 @@ std::optional<AttackIntentMessage> DecodeAttackIntent(const std::vector<uint8_t>
     if (!ReadScope(reader, message.scope) || !reader.ReadU64(message.participantId) ||
         !reader.ReadU64(message.requestId) || !reader.ReadU64(message.entityId) ||
         !reader.ReadU32(message.playerTick) || !reader.ReadU16(scene) || !reader.ReadU8(message.attackKind) ||
-        !reader.ReadU8(message.damageEffect) || !reader.ReadU8(message.damage) || !reader.AtEnd()) {
+        !reader.ReadU8(message.damageEffect) || !reader.ReadU8(message.damage) || !reader.ReadU32(message.damageFlags) ||
+        !reader.AtEnd()) {
         return std::nullopt;
     }
     message.scene = static_cast<int16_t>(scene);
+    return message;
+}
+
+std::vector<uint8_t> EncodeActorInteractionIntent(const ActorInteractionIntentMessage& message) {
+    ByteWriter writer;
+    WriteScope(writer, message.scope);
+    writer.WriteU64(message.participantId);
+    writer.WriteU64(message.requestId);
+    writer.WriteU64(message.entityId);
+    writer.WriteU32(message.playerTick);
+    writer.WriteU16(static_cast<uint16_t>(message.scene));
+    writer.WriteU8(static_cast<uint8_t>(message.kind));
+    writer.WriteF32(message.value);
+    return writer.Data();
+}
+
+std::optional<ActorInteractionIntentMessage> DecodeActorInteractionIntent(const std::vector<uint8_t>& payload) {
+    ByteReader reader(payload);
+    ActorInteractionIntentMessage message;
+    uint16_t scene = 0;
+    uint8_t kind = 0;
+    if (!ReadScope(reader, message.scope) || !reader.ReadU64(message.participantId) ||
+        !reader.ReadU64(message.requestId) || !reader.ReadU64(message.entityId) ||
+        !reader.ReadU32(message.playerTick) || !reader.ReadU16(scene) || !reader.ReadU8(kind) ||
+        !reader.ReadF32(message.value) || !reader.AtEnd() ||
+        kind < static_cast<uint8_t>(ActorInteractionKind::PushBlockBegin) ||
+        kind > static_cast<uint8_t>(ActorInteractionKind::DampeRaceStart)) {
+        return std::nullopt;
+    }
+    message.scene = static_cast<int16_t>(scene);
+    message.kind = static_cast<ActorInteractionKind>(kind);
     return message;
 }
 

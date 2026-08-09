@@ -44,6 +44,41 @@ int main() {
     assert(std::abs(static_cast<int>(sampled.rotation[1])) > 32000);
     assert(std::abs(static_cast<int>(sampled.joints[0])) > 32000);
 
+    PlayerSnapshotInterpolator mountedInterpolator;
+    PlayerSnapshotMessage mountedStart = Snapshot(20, 0.0f, 0);
+    mountedStart.mounted = true;
+    mountedStart.horsePosition[0] = 10.0f;
+    mountedStart.horsePosition[1] = 20.0f;
+    mountedStart.horseRotation[1] = 32760;
+    mountedStart.horseAnimation = 6;
+    mountedStart.horseAnimationFrame = 4.0f;
+    mountedStart.horseSpeed = 8.0f;
+    PlayerSnapshotMessage mountedEnd = mountedStart;
+    mountedEnd.tick = 21;
+    mountedEnd.position[0] = 100.0f;
+    mountedEnd.horsePosition[0] = 110.0f;
+    mountedEnd.horsePosition[1] = 40.0f;
+    mountedEnd.horseRotation[1] = -32760;
+    mountedEnd.horseAnimationFrame = 12.0f;
+    mountedEnd.horseSpeed = 12.0f;
+    mountedInterpolator.Push(mountedStart, 1000);
+    mountedInterpolator.Push(mountedEnd, 1050);
+    assert(mountedInterpolator.Sample(1125, sampled));
+    assert(sampled.mounted);
+    AssertNear(sampled.horsePosition[0], 60.0f);
+    AssertNear(sampled.horsePosition[1], 30.0f);
+    assert(std::abs(static_cast<int>(sampled.horseRotation[1])) > 32000);
+    AssertNear(sampled.horseAnimationFrame, 8.0f);
+    AssertNear(sampled.horseSpeed, 10.0f);
+
+    PlayerSnapshotMessage dismounted = mountedEnd;
+    dismounted.tick = 22;
+    dismounted.mounted = false;
+    mountedInterpolator.Push(dismounted, 1100);
+    assert(mountedInterpolator.Sample(1200, sampled));
+    // Mount state is discrete: do not retain an interpolated Epona after a newer dismount snapshot.
+    assert(!sampled.mounted);
+
     assert(interpolator.Sample(1200, sampled));
     AssertNear(sampled.position[0], 200.0f);
     assert(interpolator.Sample(1400, sampled));

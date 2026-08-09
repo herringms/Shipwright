@@ -7,8 +7,11 @@
 #include "GohmaAdapter.h"
 #include "JabuActorBridge.h"
 #include "ProgressionAdapter.h"
+#include "DampeRaceBridge.h"
+#include "PushBlockBridge.h"
 #include "RemotePlayer.h"
 #include "RemotePlayerRoomPolicy.h"
+#include "SharedEnemyCombatPolicy.h"
 #include "StalchildPolicy.h"
 
 #include "soh/SaveManager.h"
@@ -40,12 +43,16 @@ extern "C" {
 #include "functions.h"
 #include "macros.h"
 #include "src/overlays/actors/ovl_Bg_Spot08_Bakudankabe/z_bg_spot08_bakudankabe.h"
+#include "src/overlays/actors/ovl_Bg_Spot02_Objects/z_bg_spot02_objects.h"
 #include "src/overlays/actors/ovl_Bg_Toki_Swd/z_bg_toki_swd.h"
 #include "src/overlays/actors/ovl_Demo_Kankyo/z_demo_kankyo.h"
 #include "src/overlays/actors/ovl_En_Encount1/z_en_encount1.h"
+#include "src/overlays/actors/ovl_En_Horse/z_en_horse.h"
 #include "src/overlays/actors/ovl_En_Kz/z_en_kz.h"
+#include "src/overlays/actors/ovl_En_Md/z_en_md.h"
 #include "src/overlays/actors/ovl_En_Okarina_Tag/z_en_okarina_tag.h"
 #include "src/overlays/actors/ovl_En_Skb/z_en_skb.h"
+#include "src/overlays/actors/ovl_Obj_Timeblock/z_obj_timeblock.h"
 #include "variables.h"
 #include "z64.h"
 
@@ -56,6 +63,12 @@ void Player_UseItem(PlayState* play, Player* player, s32 item);
 s32 EnKz_SetMovedPos(EnKz* thisx, PlayState* play);
 void EnKz_PreMweepWait(EnKz* thisx, PlayState* play);
 void EnKz_Wait(EnKz* thisx, PlayState* play);
+s32 EnMd_SetMovedPos(EnMd* thisx, PlayState* play);
+void EnMd_Idle(EnMd* thisx, PlayState* play);
+u32 ObjTimeblock_CalculateIsVisible(ObjTimeblock* thisx);
+void ObjTimeblock_SetupNormal(ObjTimeblock* thisx);
+void ObjTimeblock_SetupAltBehaviorVisible(ObjTimeblock* thisx);
+void ObjTimeblock_SetupAltBehaviourNotVisible(ObjTimeblock* thisx);
 s32 Object_Spawn(ObjectContext* objectCtx, s16 objectId);
 }
 
@@ -593,6 +606,272 @@ bool ApplyGenericEnemySnapshot(Actor* actor, const ActorSnapshotMessage& message
     return true;
 }
 
+constexpr uint8_t kDampeGhostAdapterWordCount = 9;
+constexpr uint8_t kDampeDoorAdapterWordCount = 3;
+
+bool IsDampeRaceActorId(int16_t actorId) {
+    return actorId == ACTOR_EN_PO_RELAY || actorId == ACTOR_BG_RELAY_OBJECTS;
+}
+
+ActorSnapshotMessage CapturePushBlockSnapshot(const Actor* actor, int16_t scene, uint32_t hostTick,
+                                              SessionScope scope) {
+    ActorSnapshotMessage message = CaptureGenericEnemySnapshot(actor, scene, hostTick, scope, true);
+    HyruleCoopPushBlockState state = {};
+    if (!HyruleCoop_ObjOshihikiCaptureState(actor, &state)) {
+        return message;
+    }
+    std::copy(std::begin(state.homePosition), std::end(state.homePosition), message.homePosition);
+    std::copy(std::begin(state.position), std::end(state.position), message.position);
+    std::copy(std::begin(state.velocity), std::end(state.velocity), message.velocity);
+    message.speed = state.pushSpeed;
+    message.gravity = state.pushDistance;
+    message.animationFrame = state.direction;
+    message.health = state.timer;
+    message.worldRotation[1] = state.worldYaw;
+    message.stateId = state.phase;
+    return message;
+}
+
+bool ApplyPushBlockSnapshot(Actor* actor, const ActorSnapshotMessage& message) {
+    HyruleCoopPushBlockState state = {};
+    std::copy(std::begin(message.homePosition), std::end(message.homePosition), state.homePosition);
+    std::copy(std::begin(message.position), std::end(message.position), state.position);
+    std::copy(std::begin(message.velocity), std::end(message.velocity), state.velocity);
+    state.pushSpeed = message.speed;
+    state.pushDistance = message.gravity;
+    state.direction = message.animationFrame;
+    state.timer = message.health;
+    state.worldYaw = message.worldRotation[1];
+    state.phase = static_cast<uint8_t>(message.stateId);
+    return HyruleCoop_ObjOshihikiApplyState(actor, gPlayState, &state) != 0;
+}
+
+ActorSnapshotMessage CaptureDampeRaceSnapshot(const Actor* actor, int16_t scene, uint32_t hostTick,
+                                              SessionScope scope) {
+    ActorSnapshotMessage message = CaptureGenericEnemySnapshot(actor, scene, hostTick, scope, true);
+    if (actor->id == ACTOR_EN_PO_RELAY) {
+        HyruleCoopDampeRaceGhostState state = {};
+        if (!HyruleCoop_DampeRaceCaptureGhostState(actor, &state)) {
+            return message;
+        }
+        message.adapterWordCount = kDampeGhostAdapterWordCount;
+        message.stateId = state.action;
+        message.adapterState[0] = state.hookshotSlotFull;
+        message.adapterState[1] = state.bobTimer;
+        message.adapterState[2] = state.eyeTextureIdx;
+        message.adapterState[3] = state.actionTimer;
+        message.adapterState[4] = state.pathIndex;
+        message.adapterState[5] = state.yawTowardsPathPoint;
+        message.adapterState[6] = static_cast<int16_t>(state.textId);
+        message.adapterState[7] = state.timerState;
+        message.adapterState[8] = state.timerSeconds;
+        message.position[0] = state.worldPosX;
+        message.position[1] = state.worldPosY;
+        message.position[2] = state.worldPosZ;
+        message.homePosition[1] = state.homePosY;
+        message.speed = state.speedXZ;
+        message.scale[0] = message.scale[1] = message.scale[2] = state.scale;
+        message.worldRotation[1] = state.worldRotY;
+        message.shapeRotation[1] = state.shapeRotY;
+        message.animationFrame = state.animationFrame;
+        message.animationSpeed = state.animationSpeed;
+    } else if (actor->id == ACTOR_BG_RELAY_OBJECTS) {
+        HyruleCoopDampeRaceDoorState state = {};
+        if (!HyruleCoop_DampeRaceCaptureDoorState(actor, &state)) {
+            return message;
+        }
+        message.adapterWordCount = kDampeDoorAdapterWordCount;
+        message.stateId = state.action;
+        message.adapterState[0] = state.switchFlag;
+        message.adapterState[1] = state.switchIsSet;
+        message.adapterState[2] = state.timer;
+        message.room = state.room;
+        message.position[0] = state.worldPosX;
+        message.position[1] = state.worldPosY;
+        message.position[2] = state.worldPosZ;
+        message.velocity[1] = state.velocityY;
+        message.worldRotation[1] = state.worldRotY;
+    }
+    return message;
+}
+
+bool ApplyDampeRaceSnapshot(Actor* actor, const ActorSnapshotMessage& message) {
+    if (actor->id == ACTOR_EN_PO_RELAY && message.adapterWordCount == kDampeGhostAdapterWordCount) {
+        HyruleCoopDampeRaceGhostState state = {};
+        state.action = static_cast<uint8_t>(message.stateId);
+        state.hookshotSlotFull = static_cast<uint8_t>(message.adapterState[0]);
+        state.bobTimer = static_cast<uint8_t>(message.adapterState[1]);
+        state.eyeTextureIdx = static_cast<uint8_t>(message.adapterState[2]);
+        state.actionTimer = message.adapterState[3];
+        state.pathIndex = message.adapterState[4];
+        state.yawTowardsPathPoint = message.adapterState[5];
+        state.textId = static_cast<uint16_t>(message.adapterState[6]);
+        state.timerState = message.adapterState[7];
+        state.timerSeconds = message.adapterState[8];
+        state.worldPosX = message.position[0];
+        state.worldPosY = message.position[1];
+        state.worldPosZ = message.position[2];
+        state.homePosY = message.homePosition[1];
+        state.speedXZ = message.speed;
+        state.scale = message.scale[0];
+        state.worldRotY = message.worldRotation[1];
+        state.shapeRotY = message.shapeRotation[1];
+        state.animationFrame = message.animationFrame;
+        state.animationSpeed = message.animationSpeed;
+        return HyruleCoop_DampeRaceApplyGhostState(actor, gPlayState, &state) != 0;
+    }
+    if (actor->id == ACTOR_BG_RELAY_OBJECTS && message.adapterWordCount == kDampeDoorAdapterWordCount) {
+        HyruleCoopDampeRaceDoorState state = {};
+        state.action = static_cast<uint8_t>(message.stateId);
+        state.switchFlag = static_cast<uint8_t>(message.adapterState[0]);
+        state.switchIsSet = static_cast<uint8_t>(message.adapterState[1]);
+        state.timer = message.adapterState[2];
+        state.room = static_cast<int8_t>(message.room);
+        state.worldPosX = message.position[0];
+        state.worldPosY = message.position[1];
+        state.worldPosZ = message.position[2];
+        state.velocityY = message.velocity[1];
+        state.worldRotY = message.worldRotation[1];
+        return HyruleCoop_DampeRaceApplyDoorState(actor, gPlayState, &state) != 0;
+    }
+    return false;
+}
+
+constexpr uint8_t kSharedCombatAttackKind = 6;
+constexpr size_t kSharedCombatEnemyAdapterWordCount = 6;
+enum SharedCombatEnemyAdapterWord : size_t {
+    SharedCombatEnemyOutcomeSequenceLow,
+    SharedCombatEnemyOutcomeSequenceHigh,
+    SharedCombatEnemyDamageEffect,
+    SharedCombatEnemyDamage,
+    SharedCombatEnemyDamageFlagsLow,
+    SharedCombatEnemyDamageFlagsHigh,
+};
+
+bool IsSharedCombatEnemyActorId(int16_t actorId) {
+    return FindSharedEnemyAdapterContract(actorId) != nullptr;
+}
+
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_RD)->family == SharedEnemyAdapterFamily::RedeadGibdo);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_MB)->family == SharedEnemyAdapterFamily::LostWoodsMoblin);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_BB)->family == SharedEnemyAdapterFamily::BlueBubble);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_TEST)->family == SharedEnemyAdapterFamily::Stalfos);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_SW)->family == SharedEnemyAdapterFamily::GoldSkulltula);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_ST)->family == SharedEnemyAdapterFamily::Skulltula);
+static_assert(FindSharedEnemyAdapterContract(ACTOR_EN_SSH)->family == SharedEnemyAdapterFamily::SkulltulaFather);
+
+bool IsSharedCombatEnemyActor(const Actor* actor) {
+    return actor != nullptr && IsSharedCombatEnemyActorId(actor->id);
+}
+
+bool PeekSharedCombatEnemyDamage(const Actor* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (actor == nullptr) {
+        return false;
+    }
+    switch (actor->id) {
+        case ACTOR_EN_RD:
+            return HyruleCoop_EnRdPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_MB:
+            return HyruleCoop_EnMbPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_BB:
+            return HyruleCoop_EnBbPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_TEST:
+            return HyruleCoop_EnTestPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_SW:
+            return HyruleCoop_EnSwPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_ST:
+            return HyruleCoop_EnStPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_SSH:
+            return HyruleCoop_EnSshPeekDamage(actor, damageEffect, damage, damageFlags) != 0;
+        default:
+            return false;
+    }
+}
+
+bool ConsumeSharedCombatEnemyDamage(Actor* actor, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (actor == nullptr) {
+        return false;
+    }
+    switch (actor->id) {
+        case ACTOR_EN_RD:
+            return HyruleCoop_EnRdConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_MB:
+            return HyruleCoop_EnMbConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_BB:
+            return HyruleCoop_EnBbConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_TEST:
+            return HyruleCoop_EnTestConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_SW:
+            return HyruleCoop_EnSwConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_ST:
+            return HyruleCoop_EnStConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_SSH:
+            return HyruleCoop_EnSshConsumeDamage(actor, damageEffect, damage, damageFlags) != 0;
+        default:
+            return false;
+    }
+}
+
+bool ApplySharedCombatEnemyDamage(Actor* actor, uint8_t damageEffect, uint8_t damage, uint32_t damageFlags) {
+    if (actor == nullptr || gPlayState == nullptr) {
+        return false;
+    }
+    switch (actor->id) {
+        case ACTOR_EN_RD:
+            return HyruleCoop_EnRdApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_MB:
+            return HyruleCoop_EnMbApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_BB:
+            return HyruleCoop_EnBbApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_TEST:
+            return HyruleCoop_EnTestApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_SW:
+            return HyruleCoop_EnSwApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_ST:
+            return HyruleCoop_EnStApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        case ACTOR_EN_SSH:
+            return HyruleCoop_EnSshApplyDamage(actor, gPlayState, damageEffect, damage, damageFlags) != 0;
+        default:
+            return false;
+    }
+}
+
+ActorSnapshotMessage CaptureSharedCombatEnemySnapshot(const Actor* actor, int16_t scene, uint32_t hostTick,
+                                                      SessionScope scope, bool alive, uint32_t outcomeSequence,
+                                                      uint8_t damageEffect, uint8_t damage, uint32_t damageFlags) {
+    ActorSnapshotMessage message = CaptureGenericEnemySnapshot(actor, scene, hostTick, scope, alive);
+    message.adapterWordCount = kSharedCombatEnemyAdapterWordCount;
+    message.adapterState[SharedCombatEnemyOutcomeSequenceLow] = static_cast<int16_t>(outcomeSequence & 0xFFFF);
+    message.adapterState[SharedCombatEnemyOutcomeSequenceHigh] = static_cast<int16_t>(outcomeSequence >> 16);
+    message.adapterState[SharedCombatEnemyDamageEffect] = damageEffect;
+    message.adapterState[SharedCombatEnemyDamage] = damage;
+    message.adapterState[SharedCombatEnemyDamageFlagsLow] = static_cast<int16_t>(damageFlags & 0xFFFF);
+    message.adapterState[SharedCombatEnemyDamageFlagsHigh] = static_cast<int16_t>(damageFlags >> 16);
+    return message;
+}
+
+bool DecodeSharedCombatEnemyOutcome(const ActorSnapshotMessage& message, uint32_t* outcomeSequence,
+                                    uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (message.adapterWordCount != kSharedCombatEnemyAdapterWordCount || outcomeSequence == nullptr ||
+        damageEffect == nullptr || damage == nullptr || damageFlags == nullptr) {
+        return false;
+    }
+    *outcomeSequence = static_cast<uint16_t>(message.adapterState[SharedCombatEnemyOutcomeSequenceLow]) |
+                       (static_cast<uint32_t>(static_cast<uint16_t>(
+                            message.adapterState[SharedCombatEnemyOutcomeSequenceHigh]))
+                        << 16);
+    *damageEffect = static_cast<uint8_t>(message.adapterState[SharedCombatEnemyDamageEffect]);
+    *damage = static_cast<uint8_t>(message.adapterState[SharedCombatEnemyDamage]);
+    *damageFlags = static_cast<uint16_t>(message.adapterState[SharedCombatEnemyDamageFlagsLow]) |
+                   (static_cast<uint32_t>(static_cast<uint16_t>(message.adapterState[SharedCombatEnemyDamageFlagsHigh]))
+                    << 16);
+    return true;
+}
+
+bool IsNewSharedCombatEnemyOutcome(uint32_t appliedSequence, uint32_t incomingSequence) {
+    return ShouldApplySharedEnemyHostOutcome(appliedSequence, incomingSequence);
+}
+
 bool ApplyStalchildSnapshot(Actor* actor, const ActorSnapshotMessage& message, bool snapTransform) {
     if (actor == nullptr || actor->id != ACTOR_EN_SKB ||
         !IsValidStalchildAdapterState(message.adapterWordCount, message.adapterState.data()) ||
@@ -777,9 +1056,11 @@ bool Manager::Join(const std::string& address, uint16_t port, const std::string&
 
 void Manager::Disconnect() {
     RestoreSaveOverlay();
+    DestroyRemoteHorse();
     DestroyRemotePlayer();
     RegisterHooks(false);
     transport.Stop();
+    HyruleCoop_DampeRaceSetLocalAuthority(1);
     ResetSessionState();
     phase = ConnectionPhase::Idle;
 }
@@ -787,14 +1068,29 @@ void Manager::Disconnect() {
 void Manager::Update() {
     frameCounter++;
     automatedTestTick++;
+    HyruleCoop_DampeRaceSetLocalAuthority(
+        transport.GetRole() != SessionRole::Client || !handshakeComplete ? 1 : 0);
+
+    for (auto iterator = lastActorInteractionTick.begin(); iterator != lastActorInteractionTick.end();) {
+        if (frameCounter - iterator->second <= 120) {
+            ++iterator;
+            continue;
+        }
+        pendingActorInteractionRequests.erase(iterator->first);
+        iterator = lastActorInteractionTick.erase(iterator);
+    }
 
     const bool saveLoaded = IsSaveLoaded();
     if (saveLoaded && !saveOverlayCaptured) {
         CaptureSaveOverlay();
     }
+    if (saveLoaded && transport.GetRole() == SessionRole::Client && !clientProgressionBaselineCaptured) {
+        lastObservedClientProgression = CaptureSharedProgression(&gSaveContext);
+        clientProgressionBaselineCaptured = true;
+    }
     if (saveLoaded && !observedSaveLoaded && handshakeComplete) {
         if (transport.GetRole() == SessionRole::Host) {
-            BeginReconnectBarrier();
+            BeginHandshakeBarrier();
         } else if (transport.GetRole() == SessionRole::Client) {
             SendSnapshotRequest();
         }
@@ -817,10 +1113,12 @@ void Manager::Update() {
     for (const Packet& packet : transport.TakeIncomingPackets()) {
         HandlePacket(packet);
     }
+    ReconcileClientDurableProgression();
     ApplyPendingClockSnapshot();
     UpdateStoryEvent();
 
     if (transportState == TransportState::Error) {
+        DestroyRemoteHorse();
         DestroyRemotePlayer();
         remotePlayerSnapshot.reset();
         remotePlayerInterpolator.Reset();
@@ -844,6 +1142,7 @@ void Manager::Update() {
                 SetAutomatedTestStage(TestAwaitingReconnect, "peer-disconnected-for-reconnect");
             }
         } else {
+            DestroyRemoteHorse();
             DestroyRemotePlayer();
             remotePlayerSnapshot.reset();
             remotePlayerInterpolator.Reset();
@@ -883,6 +1182,10 @@ void Manager::Update() {
 
     if (handshakeComplete && transport.GetRole() == SessionRole::Host && frameCounter % 30 == 0 && IsSaveLoaded()) {
         SendClockSnapshot();
+    }
+
+    if (handshakeComplete && transport.GetRole() == SessionRole::Host && frameCounter % 60 == 0 && IsSaveLoaded()) {
+        SendProgressionSnapshot();
     }
 
     if (handshakeComplete) {
@@ -1066,6 +1369,14 @@ bool Manager::ShouldProcessStalchildHit(void* actor, void* attacker) {
     return true;
 }
 
+bool Manager::ShouldSuppressSharedEnemyLocalReward(void* actor) const {
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || actor == nullptr) {
+        return false;
+    }
+    return std::any_of(localSharedCombatEnemies.begin(), localSharedCombatEnemies.end(),
+                       [actor](const auto& entry) { return entry.second == actor; });
+}
+
 bool Manager::SanitizeSaveCopy(void* saveContextRef) const {
     if (transport.GetRole() != SessionRole::Client) {
         return true;
@@ -1093,6 +1404,21 @@ void Manager::PrepareRemotePlayer(void* actorRef) {
 void Manager::NotifyRemotePlayerDestroyed(void* actor) {
     if (remotePlayer == actor) {
         remotePlayer = nullptr;
+    }
+}
+
+void Manager::PrepareRemoteHorse(void* actorRef) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    remoteHorse = actor;
+    actor->init = HyruleCoopRemoteHorse_Init;
+    actor->update = HyruleCoopRemoteHorse_Update;
+    actor->draw = HyruleCoopRemoteHorse_Draw;
+    actor->destroy = HyruleCoopRemoteHorse_Destroy;
+}
+
+void Manager::NotifyRemoteHorseDestroyed(void* actor) {
+    if (remoteHorse == actor) {
+        remoteHorse = nullptr;
     }
 }
 
@@ -1226,10 +1552,19 @@ void Manager::RegisterHooks(bool enabled) {
         // must not redefine the scene header that is already loaded in memory.
         loadedSceneLayer = static_cast<int16_t>(gSaveContext.sceneLayer);
         remotePlayer = nullptr;
+        remoteHorse = nullptr;
+        preparingRemoteHorse = false;
         localDekuBabas.clear();
         localGohmas.clear();
         localGohmaDeathPresentations.clear();
         localGenericEnemies.clear();
+        localSharedCombatEnemies.clear();
+        sharedCombatEnemyOutcomes.clear();
+        appliedSharedCombatEnemyOutcomeSequences.clear();
+        localPushBlocks.clear();
+        localDampeRaceActors.clear();
+        pendingActorInteractionRequests.clear();
+        lastActorInteractionTick.clear();
         localJabuActors.clear();
         localBarinadeActors.clear();
         ClearStalchildSceneState();
@@ -1247,6 +1582,7 @@ void Manager::RegisterHooks(bool enabled) {
             player->actor.home.pos = player->actor.world.pos;
         }
         RefreshRemotePlayer();
+        RefreshRemoteHorse();
         SendSnapshotRequest();
         SendBarrierReady();
         const BarrierState& barrier = barrierCoordinator.GetState();
@@ -1261,6 +1597,11 @@ void Manager::RegisterHooks(bool enabled) {
             PrepareRemotePlayer(actor);
         }
     });
+    COND_ID_HOOK(ShouldActorInit, ACTOR_EN_HORSE, enabled, [this](void* actor, bool*) {
+        if (preparingRemoteHorse) {
+            PrepareRemoteHorse(actor);
+        }
+    });
     COND_ID_HOOK(ShouldActorUpdate, ACTOR_PLAYER, enabled,
                  [this](void* actor, bool* shouldUpdate) { InjectAutomatedTestInput(actor, shouldUpdate); });
     COND_HOOK(OnPlayerUpdate, enabled, [this]() {
@@ -1273,6 +1614,7 @@ void Manager::RegisterHooks(bool enabled) {
         if (remotePlayer == nullptr) {
             RefreshRemotePlayer();
         }
+        RefreshRemoteHorse();
     });
     COND_HOOK(OnSceneFlagSet, enabled, [this](int16_t scene, int16_t flagType, int16_t flag) {
         if (applyingAuthoritativeState || !IsValidReplicatedSceneFlag(scene, flagType, flag)) {
@@ -1436,14 +1778,19 @@ void Manager::RegisterHooks(bool enabled) {
         }
     });
     COND_HOOK(OnActorUpdate, enabled, [this](void* actor) {
+        ReconcileAuthoritativeSceneActor(actor);
         UpdateBarinade(actor);
         UpdateJabuActor(actor);
         UpdateGenericEnemy(actor);
+        UpdateSharedCombatEnemy(actor);
+        UpdatePushBlock(actor);
+        UpdateDampeRaceActor(actor);
     });
     COND_HOOK(ShouldActorUpdate, enabled, [this](void* actor, bool* shouldUpdate) {
         ApplyBarinadeAuthority(actor, shouldUpdate);
         ApplyJabuActorAuthority(actor, shouldUpdate);
         ApplyGenericEnemyAuthority(actor, shouldUpdate);
+        ApplySharedCombatEnemyAuthority(actor, shouldUpdate);
     });
     COND_HOOK(OnActorKill, enabled, [this](void* actor) {
         if (transport.GetRole() == SessionRole::Host) {
@@ -1459,12 +1806,16 @@ void Manager::RegisterHooks(bool enabled) {
             SendBarinadeSnapshot(actor, false);
             SendJabuActorSnapshot(actor, false);
             SendGenericEnemySnapshot(actor, false);
+            SendSharedCombatEnemySnapshot(actor, false);
         }
     });
     COND_HOOK(OnActorDestroy, enabled, [this](void* actor) {
         ForgetBarinade(actor);
         ForgetJabuActor(actor);
         ForgetGenericEnemy(actor);
+        ForgetSharedCombatEnemy(actor);
+        ForgetPushBlock(actor);
+        ForgetDampeRaceActor(actor);
     });
     COND_ID_HOOK(OnActorUpdate, ACTOR_EN_KZ, enabled, [this](void* actor) { ReconcileKingZora(actor); });
     COND_ID_HOOK(ShouldActorUpdate, ACTOR_BG_SPOT08_BAKUDANKABE, enabled,
@@ -1475,10 +1826,12 @@ void Manager::RegisterHooks(bool enabled) {
 }
 
 void Manager::ResetPeerState() {
+    DestroyRemoteHorse();
     DestroyRemotePlayer();
     transport.DisableRealtime();
     helloSent = false;
     handshakeComplete = false;
+    pendingHandshakeBarrierKind = BarrierKind::ReconnectSnapshot;
     playerId = 0;
     remotePlayerName.clear();
     remotePlayerSnapshot.reset();
@@ -1490,12 +1843,20 @@ void Manager::ResetPeerState() {
     lastRemoteMeleeTick = 0;
     lastRemoteMeleeScene = -1;
     preparingRemotePlayer = false;
+    preparingRemoteHorse = false;
     applyingAuthoritativeState = false;
     negotiatedCapabilities.clear();
     pendingGuestAttacks.clear();
     pendingGuestAttackRequests.clear();
     lastGuestAttackTick.clear();
+    pendingActorInteractionRequests.clear();
+    lastActorInteractionTick.clear();
     localGenericEnemies.clear();
+    localSharedCombatEnemies.clear();
+    sharedCombatEnemyOutcomes.clear();
+    appliedSharedCombatEnemyOutcomeSequences.clear();
+    localPushBlocks.clear();
+    localDampeRaceActors.clear();
     localJabuActors.clear();
     localBarinadeActors.clear();
     localStalchildren.clear();
@@ -1537,9 +1898,19 @@ void Manager::ResetSessionState() {
     originalProgression = {};
     canonicalProgression = {};
     canonicalProgressionCaptured = false;
+    lastObservedClientProgression = {};
+    clientProgressionBaselineCaptured = false;
+    pendingClientEventFlags.clear();
     localDekuBabas.clear();
     localGohmas.clear();
     localGohmaDeathPresentations.clear();
+    localSharedCombatEnemies.clear();
+    sharedCombatEnemyOutcomes.clear();
+    appliedSharedCombatEnemyOutcomeSequences.clear();
+    localPushBlocks.clear();
+    localDampeRaceActors.clear();
+    pendingActorInteractionRequests.clear();
+    lastActorInteractionTick.clear();
     localJabuActors.clear();
     localBarinadeActors.clear();
     ClearStalchildSessionState();
@@ -1621,6 +1992,9 @@ void Manager::HandlePacket(const Packet& packet) {
         case MessageType::StoryEventCommand:
             HandleStoryEventCommand(packet);
             break;
+        case MessageType::ActorInteractionIntent:
+            HandleActorInteractionIntent(packet);
+            break;
         default:
             SPDLOG_WARN("[HyruleCoop] Ignoring unsupported packet type {}", static_cast<uint16_t>(packet.type));
             break;
@@ -1666,6 +2040,7 @@ void Manager::HandleHello(const Packet& packet) {
     }
 
     playerId = 1;
+    pendingHandshakeBarrierKind = HandshakeBarrierKind(requestedCurrentSession);
     remotePlayerName = message->playerName.empty() ? "Guest" : message->playerName.substr(0, 24);
     negotiatedCapabilities = IntersectCapabilities(SupportedCapabilities(), message->capabilities);
     transport.ConfigureRealtime(sessionScope, 2, guestTokenHigh, guestTokenLow);
@@ -1677,7 +2052,7 @@ void Manager::HandleHello(const Packet& packet) {
         SendClockSnapshot();
         SendSceneFlagsSnapshot(gPlayState->sceneNum);
         SendProgressionSnapshot();
-        BeginReconnectBarrier();
+        BeginHandshakeBarrier();
     }
     SPDLOG_INFO("[HyruleCoop] Accepted player {}", message->playerName);
 }
@@ -1803,6 +2178,7 @@ void Manager::HandlePlayerSnapshot(const Packet& packet) {
         DestroyRemotePlayer();
         RefreshRemotePlayer();
     }
+    RefreshRemoteHorse();
 }
 
 void Manager::HandlePlayerPresentation(const Packet& packet) {
@@ -1926,8 +2302,15 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
                               message->adapterWordCount == kJabuActorAdapterWordCount;
     const bool barinadeSnapshot = message->actorId == ACTOR_BOSS_VA &&
                                   message->adapterWordCount == kBarinadeAdapterWordCount;
+    const bool sharedCombatSnapshot = IsSharedCombatEnemyActorId(message->actorId) &&
+                                      message->adapterWordCount == kSharedCombatEnemyAdapterWordCount;
+    const bool pushBlockSnapshot = message->actorId == ACTOR_OBJ_OSHIHIKI && message->adapterWordCount == 0;
+    const bool dampeRaceSnapshot =
+        (message->actorId == ACTOR_EN_PO_RELAY && message->adapterWordCount == kDampeGhostAdapterWordCount) ||
+        (message->actorId == ACTOR_BG_RELAY_OBJECTS && message->adapterWordCount == kDampeDoorAdapterWordCount);
     const bool specializedSnapshot = message->actorId == ACTOR_EN_DEKUBABA || message->actorId == ACTOR_BOSS_GOMA ||
-                                     stalchildSnapshot || jabuSnapshot || barinadeSnapshot;
+                                     stalchildSnapshot || jabuSnapshot || barinadeSnapshot || sharedCombatSnapshot ||
+                                     pushBlockSnapshot || dampeRaceSnapshot;
     const bool genericBaselineSnapshot = message->adapterWordCount == 0 && !specializedSnapshot &&
                                          IsGenericEnemyAdapterActorId(message->actorId);
     if (!specializedSnapshot && !genericBaselineSnapshot) {
@@ -1937,6 +2320,11 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
         const auto pending = pendingGuestAttackRequests.find(message->entityId);
         if (pending != pendingGuestAttackRequests.end() && pending->second == message->acknowledgedRequestId) {
             ClearPendingGuestAttack(message->entityId);
+        }
+        const auto interaction = pendingActorInteractionRequests.find(message->entityId);
+        if (interaction != pendingActorInteractionRequests.end() &&
+            interaction->second == message->acknowledgedRequestId) {
+            ClearPendingActorInteraction(message->entityId);
         }
     }
     const auto existing = actorSnapshots.find(message->entityId);
@@ -2042,6 +2430,33 @@ void Manager::HandleActorSnapshot(const Packet& packet) {
             return;
         }
         ApplyBarinadeSnapshot(actor, *message);
+    } else if (sharedCombatSnapshot) {
+        const auto local = localSharedCombatEnemies.find(message->entityId);
+        if (local == localSharedCombatEnemies.end()) {
+            return;
+        }
+        Actor* actor = static_cast<Actor*>(local->second);
+        if (!message->alive) {
+            ClearLocalTarget(actor);
+            Actor_Kill(actor);
+            ClearPendingGuestAttack(message->entityId);
+            lastGuestAttackTick.erase(message->entityId);
+            genericGuestTargetsHitThisSwing.erase(message->entityId);
+            sharedCombatEnemyOutcomes.erase(message->entityId);
+            appliedSharedCombatEnemyOutcomeSequences.erase(message->entityId);
+            localSharedCombatEnemies.erase(local);
+            return;
+        }
+    } else if (pushBlockSnapshot) {
+        const auto local = localPushBlocks.find(message->entityId);
+        if (local != localPushBlocks.end()) {
+            ApplyPushBlockSnapshot(static_cast<Actor*>(local->second), *message);
+        }
+    } else if (dampeRaceSnapshot) {
+        const auto local = localDampeRaceActors.find(message->entityId);
+        if (local != localDampeRaceActors.end()) {
+            ApplyDampeRaceSnapshot(static_cast<Actor*>(local->second), *message);
+        }
     } else {
         const auto local = localGenericEnemies.find(message->entityId);
         if (local == localGenericEnemies.end()) {
@@ -2162,7 +2577,7 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     if (!message.has_value() || !IsCurrentScope(message->scope) || message->participantId != 2 ||
         message->requestId == 0 || message->entityId == 0 ||
         (message->attackKind != 1 && message->attackKind != 2 && message->attackKind != 3 &&
-         message->attackKind != 4)) {
+         message->attackKind != 4 && message->attackKind != 5 && message->attackKind != kSharedCombatAttackKind)) {
         if (automatedTestEnabled) {
             ReportAutomatedTest("attack-intent-invalid",
                                 "decoded=" + std::to_string(message.has_value()) +
@@ -2206,6 +2621,7 @@ void Manager::HandleAttackIntent(const Packet& packet) {
     const auto genericEnemy = localGenericEnemies.find(message->entityId);
     const auto jabuActor = localJabuActors.find(message->entityId);
     const auto barinadeActor = localBarinadeActors.find(message->entityId);
+    const auto sharedCombatEnemy = localSharedCombatEnemies.find(message->entityId);
     const auto stalchild = localStalchildren.find(message->entityId);
     const int64_t attackStateDelta = static_cast<int64_t>(message->playerTick) -
                                      static_cast<int64_t>(remotePlayerSnapshot.has_value()
@@ -2277,6 +2693,23 @@ void Manager::HandleAttackIntent(const Packet& packet) {
             accepted = HyruleCoop_BarinadeApplyDamage(actor, gPlayState, message->damageEffect,
                                                       std::clamp<uint8_t>(message->damage, 0, 8)) != 0;
             SendBarinadeSnapshot(actor, true);
+        } else if (message->attackKind == kSharedCombatAttackKind &&
+                   sharedCombatEnemy != localSharedCombatEnemies.end()) {
+            Actor* actor = static_cast<Actor*>(sharedCombatEnemy->second);
+            accepted = ApplySharedCombatEnemyDamage(actor, message->damageEffect,
+                                                    std::clamp<uint8_t>(message->damage, 1, 8),
+                                                    message->damageFlags);
+            if (accepted) {
+                SharedCombatEnemyOutcome& outcome = sharedCombatEnemyOutcomes[message->entityId];
+                outcome.sequence += 1;
+                if (outcome.sequence == 0) {
+                    outcome.sequence = 1;
+                }
+                outcome.damageEffect = message->damageEffect;
+                outcome.damage = std::clamp<uint8_t>(message->damage, 1, 8);
+                outcome.damageFlags = message->damageFlags;
+                SendSharedCombatEnemySnapshot(actor, true);
+            }
         }
     }
     if (automatedTestEnabled && !accepted) {
@@ -2299,12 +2732,67 @@ void Manager::HandleAttackIntent(const Packet& packet) {
                                 " gohma=" + std::to_string(gohma != localGohmas.end()) +
                                 " generic=" + std::to_string(genericEnemy != localGenericEnemies.end()) +
                                 " jabu=" + std::to_string(jabuActor != localJabuActors.end()) +
-                                " barinade=" + std::to_string(barinadeActor != localBarinadeActors.end()));
+                                " barinade=" + std::to_string(barinadeActor != localBarinadeActors.end()) +
+                                " shared=" + std::to_string(sharedCombatEnemy != localSharedCombatEnemies.end()));
     }
     requestLedger.Record(request, { accepted, message->entityId, frameCounter });
     const auto authoritativeState = actorSnapshots.find(message->entityId);
     if (authoritativeState != actorSnapshots.end()) {
         ActorSnapshotMessage response = authoritativeState->second;
+        response.acknowledgedRequestId = message->requestId;
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(response),
+                                           message->entityId);
+    }
+}
+
+void Manager::HandleActorInteractionIntent(const Packet& packet) {
+    if (transport.GetRole() != SessionRole::Host || !handshakeComplete || !IsSaveLoaded() ||
+        !IsRemoteTimelineCompatible()) {
+        return;
+    }
+    const auto message = DecodeActorInteractionIntent(packet.payload);
+    if (!message.has_value() || !IsCurrentScope(message->scope) || message->participantId != 2 ||
+        message->requestId == 0 || message->entityId == 0 || message->scene != gPlayState->sceneNum) {
+        return;
+    }
+    const RequestKey request{ message->scope, message->participantId, message->requestId };
+    RequestOutcome prior;
+    const RequestLookup lookup = requestLedger.Lookup(request, &prior);
+    if (lookup == RequestLookup::Replay) {
+        const auto snapshot = actorSnapshots.find(message->entityId);
+        if (snapshot != actorSnapshots.end()) {
+            ActorSnapshotMessage response = snapshot->second;
+            response.acknowledgedRequestId = message->requestId;
+            transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(response),
+                                               message->entityId);
+        }
+        return;
+    }
+    if (lookup != RequestLookup::New || !remotePlayerSnapshot.has_value() ||
+        remotePlayerSnapshot->scene != message->scene) {
+        return;
+    }
+
+    bool accepted = false;
+    const auto snapshot = actorSnapshots.find(message->entityId);
+    const bool nearby = snapshot != actorSnapshots.end() &&
+                        DistanceSquared(remotePlayerSnapshot->position, snapshot->second.position) <= 300.0f * 300.0f;
+    if (nearby && message->kind == ActorInteractionKind::PushBlockBegin) {
+        const auto block = localPushBlocks.find(message->entityId);
+        if (block != localPushBlocks.end()) {
+            accepted = HyruleCoop_ObjOshihikiBeginPush(block->second, gPlayState, message->value) != 0;
+            SendPushBlockSnapshot(block->second, message->requestId);
+        }
+    } else if (nearby && message->kind == ActorInteractionKind::DampeRaceStart) {
+        const auto dampe = localDampeRaceActors.find(message->entityId);
+        if (dampe != localDampeRaceActors.end() && static_cast<Actor*>(dampe->second)->id == ACTOR_EN_PO_RELAY) {
+            accepted = HyruleCoop_DampeRaceBeginHostRace(dampe->second, gPlayState) != 0;
+            SendDampeRaceSnapshot(dampe->second, message->requestId);
+        }
+    }
+    requestLedger.Record(request, { accepted, message->entityId, frameCounter });
+    if (!accepted && snapshot != actorSnapshots.end()) {
+        ActorSnapshotMessage response = snapshot->second;
         response.acknowledgedRequestId = message->requestId;
         transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(response),
                                            message->entityId);
@@ -2369,8 +2857,41 @@ void Manager::HandleProgressionSnapshot(const Packet& packet) {
         collectedLocations[location.locationId] = location;
     }
     ApplyCanonicalProgression(message->shared);
+    for (auto pending = pendingClientEventFlags.begin(); pending != pendingClientEventFlags.end();) {
+        if (IsPackedEventFlagSet(message->shared.eventChkInf, *pending)) {
+            pending = pendingClientEventFlags.erase(pending);
+            continue;
+        }
+        gSaveContext.eventChkInf[*pending >> 4] |= static_cast<uint16_t>(1u << (*pending & 0x0F));
+        ++pending;
+    }
+    if (!pendingClientEventFlags.empty()) {
+        ReconcileSharedProgressionDerivedFlags(&gSaveContext);
+    }
     applyingAuthoritativeState = false;
+    lastObservedClientProgression = CaptureSharedProgression(&gSaveContext);
     lastAppliedProgressionRevision = message->revision;
+}
+
+void Manager::ReconcileClientDurableProgression() {
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsSaveLoaded() ||
+        !clientProgressionBaselineCaptured) {
+        return;
+    }
+
+    const SharedProgressionState current = CaptureSharedProgression(&gSaveContext);
+    if (current.eventChkInf == lastObservedClientProgression.eventChkInf) {
+        return;
+    }
+    for (const uint16_t flag : CollectNewlySetEventFlags(lastObservedClientProgression.eventChkInf,
+                                                         current.eventChkInf)) {
+        if (!IsValidDurableGlobalFlag(FLAG_EVENT_CHECK_INF, static_cast<int16_t>(flag))) {
+            continue;
+        }
+        pendingClientEventFlags.insert(flag);
+        SendGlobalFlagIntent(FLAG_EVENT_CHECK_INF, static_cast<int16_t>(flag), true);
+    }
+    lastObservedClientProgression = current;
 }
 
 void Manager::HandleProgressionIntent(const Packet& packet) {
@@ -2601,6 +3122,20 @@ void Manager::SendPlayerSnapshot() {
     message.focusActorId = player->focusActor == nullptr ? -1 : player->focusActor->id;
     message.meleeWeaponState = player->meleeWeaponState;
     message.meleeWeaponAnimation = player->meleeWeaponAnimation;
+    message.mounted = (player->stateFlags1 & PLAYER_STATE1_ON_HORSE) != 0 && player->rideActor != nullptr &&
+                      player->rideActor->id == ACTOR_EN_HORSE;
+    if (message.mounted) {
+        const EnHorse* horse = reinterpret_cast<const EnHorse*>(player->rideActor);
+        message.horsePosition[0] = horse->actor.world.pos.x;
+        message.horsePosition[1] = horse->actor.world.pos.y;
+        message.horsePosition[2] = horse->actor.world.pos.z;
+        message.horseRotation[0] = horse->actor.shape.rot.x;
+        message.horseRotation[1] = horse->actor.shape.rot.y;
+        message.horseRotation[2] = horse->actor.shape.rot.z;
+        message.horseAnimation = static_cast<int8_t>(horse->animationIdx);
+        message.horseAnimationFrame = horse->skin.skelAnime.curFrame;
+        message.horseSpeed = horse->actor.speedXZ;
+    }
     // Position snapshots may be coalesced, but a later idle frame must not replace a brief sword swing before it
     // reaches the peer. Combat-active frames use their tick as a one-shot stream while normal movement stays on 0.
     const uint64_t streamId = message.meleeWeaponState > 0 ? message.tick : 0;
@@ -2699,7 +3234,7 @@ void Manager::SendBarrierReady() {
 }
 
 void Manager::SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackKind, uint8_t damageEffect,
-                               uint8_t damage) {
+                               uint8_t damage, uint32_t damageFlags) {
     if (!handshakeComplete || transport.GetRole() != SessionRole::Client || entityId == 0) {
         return;
     }
@@ -2713,6 +3248,7 @@ void Manager::SendAttackIntent(uint64_t entityId, int16_t scene, uint8_t attackK
     message.attackKind = attackKind;
     message.damageEffect = damageEffect;
     message.damage = std::max<uint8_t>(1, damage);
+    message.damageFlags = damageFlags;
     if (transport.SendRepeatedRealtime(MessageType::AttackIntent, EncodeAttackIntent(message), message.entityId)) {
         pendingGuestAttackRequests[entityId] = message.requestId;
         if (automatedTestEnabled) {
@@ -2731,6 +3267,33 @@ void Manager::ClearPendingGuestAttack(uint64_t entityId) {
     transport.CancelRepeatedRealtime(MessageType::AttackIntent, entityId);
     pendingGuestAttackRequests.erase(entityId);
     pendingGuestAttacks.erase(entityId);
+}
+
+void Manager::SendActorInteractionIntent(uint64_t entityId, int16_t scene, ActorInteractionKind kind, float value) {
+    if (!handshakeComplete || transport.GetRole() != SessionRole::Client || entityId == 0 ||
+        pendingActorInteractionRequests.contains(entityId)) {
+        return;
+    }
+    ActorInteractionIntentMessage message;
+    message.scope = sessionScope;
+    message.participantId = playerId;
+    message.requestId = nextRequestId++;
+    message.entityId = entityId;
+    message.playerTick = frameCounter;
+    message.scene = scene;
+    message.kind = kind;
+    message.value = value;
+    if (transport.SendRepeatedRealtime(MessageType::ActorInteractionIntent,
+                                       EncodeActorInteractionIntent(message), message.entityId)) {
+        pendingActorInteractionRequests[entityId] = message.requestId;
+        lastActorInteractionTick[entityId] = frameCounter;
+    }
+}
+
+void Manager::ClearPendingActorInteraction(uint64_t entityId) {
+    transport.CancelRepeatedRealtime(MessageType::ActorInteractionIntent, entityId);
+    pendingActorInteractionRequests.erase(entityId);
+    lastActorInteractionTick.erase(entityId);
 }
 
 void Manager::SendCollectibleIntent(int16_t scene, int16_t flagType, int16_t flag) {
@@ -2752,10 +3315,16 @@ void Manager::SendProgressionSnapshot() {
     if (!handshakeComplete || transport.GetRole() != SessionRole::Host) {
         return;
     }
+    const SharedProgressionState previousProgression = canonicalProgression;
+    const bool hadCanonicalProgression = canonicalProgressionCaptured;
+    CaptureCanonicalProgression();
+    if (!hadCanonicalProgression || canonicalProgression != previousProgression) {
+        ++progressionRevision;
+    }
+
     ProgressionSnapshotMessage message;
     message.scope = sessionScope;
     message.revision = progressionRevision;
-    CaptureCanonicalProgression();
     message.shared = canonicalProgression;
     message.locations.reserve(collectedLocations.size());
     for (const auto& [locationId, location] : collectedLocations) {
@@ -3310,6 +3879,280 @@ void Manager::ForgetGenericEnemy(void* actorRef) {
             lastGuestAttackTick.erase(iterator->first);
             genericGuestTargetsHitThisSwing.erase(iterator->first);
             iterator = localGenericEnemies.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
+void Manager::SendSharedCombatEnemySnapshot(void* actorRef, bool alive, uint64_t acknowledgedRequestId) {
+    if (transport.GetRole() != SessionRole::Host || !IsSaveLoaded() || actorRef == nullptr || gPlayState == nullptr) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    const bool knownActor = std::any_of(localSharedCombatEnemies.begin(), localSharedCombatEnemies.end(),
+                                        [actor](const auto& entry) { return entry.second == actor; });
+    if ((alive && !IsSharedCombatEnemyActor(actor)) || (!alive && !knownActor)) {
+        return;
+    }
+    const uint64_t entityId = GetGenericEnemyEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    const auto outcome = sharedCombatEnemyOutcomes.find(entityId);
+    const SharedCombatEnemyOutcome state = outcome == sharedCombatEnemyOutcomes.end()
+                                               ? SharedCombatEnemyOutcome{}
+                                               : outcome->second;
+    ActorSnapshotMessage message =
+        CaptureSharedCombatEnemySnapshot(actor, gPlayState->sceneNum, frameCounter, sessionScope, alive,
+                                         state.sequence, state.damageEffect, state.damage, state.damageFlags);
+    message.acknowledgedRequestId = acknowledgedRequestId;
+    const auto previous = actorSnapshots.find(entityId);
+    const bool outcomeChanged = previous == actorSnapshots.end() ||
+                                previous->second.adapterWordCount != kSharedCombatEnemyAdapterWordCount ||
+                                previous->second.adapterState != message.adapterState;
+    const bool importantTransition = acknowledgedRequestId != 0 || previous == actorSnapshots.end() ||
+                                     previous->second.alive != message.alive ||
+                                     previous->second.health != message.health || outcomeChanged;
+    actorSnapshots[entityId] = message;
+    if (alive) {
+        localSharedCombatEnemies[entityId] = actor;
+    }
+    if (importantTransition) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message), entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), entityId);
+    }
+}
+
+void Manager::UpdateSharedCombatEnemy(void* actorRef) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    if (!IsSharedCombatEnemyActor(actor) || gPlayState == nullptr) {
+        return;
+    }
+    const uint64_t entityId = GetGenericEnemyEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    if (transport.GetRole() == SessionRole::Host) {
+        localSharedCombatEnemies[entityId] = actor;
+        const auto previous = actorSnapshots.find(entityId);
+        const auto outcome = sharedCombatEnemyOutcomes.find(entityId);
+        const bool unsentOutcome = outcome != sharedCombatEnemyOutcomes.end() &&
+                                   (previous == actorSnapshots.end() ||
+                                    previous->second.adapterWordCount != kSharedCombatEnemyAdapterWordCount ||
+                                    static_cast<uint16_t>(previous->second.adapterState[SharedCombatEnemyOutcomeSequenceLow]) !=
+                                        static_cast<uint16_t>(outcome->second.sequence & 0xFFFF) ||
+                                    static_cast<uint16_t>(previous->second.adapterState[SharedCombatEnemyOutcomeSequenceHigh]) !=
+                                        static_cast<uint16_t>(outcome->second.sequence >> 16));
+        if (unsentOutcome || frameCounter % 2 == 0) {
+            SendSharedCombatEnemySnapshot(actor, true);
+        }
+        return;
+    }
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsSaveLoaded() ||
+        !IsRemoteTimelineCompatible()) {
+        return;
+    }
+    localSharedCombatEnemies[entityId] = actor;
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot != actorSnapshots.end() && snapshot->second.alive) {
+        // Health converges without moving the actor. Position, action, and animation stay native to avoid AI state
+        // conflicts between the two local worlds.
+        actor->colChkInfo.health = std::max<int16_t>(0, snapshot->second.health);
+    }
+}
+
+void Manager::ApplySharedCombatEnemyAuthority(void* actorRef, bool* shouldUpdate) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    if (!IsSharedCombatEnemyActor(actor) || shouldUpdate == nullptr || gPlayState == nullptr || !IsSaveLoaded()) {
+        return;
+    }
+    const uint64_t entityId = GetGenericEnemyEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    if (transport.GetRole() == SessionRole::Host) {
+        localSharedCombatEnemies[entityId] = actor;
+        if (!handshakeComplete) {
+            return;
+        }
+        uint8_t damageEffect = 0;
+        uint8_t damage = 0;
+        uint32_t damageFlags = 0;
+        if (PeekSharedCombatEnemyDamage(actor, &damageEffect, &damage, &damageFlags)) {
+            SharedCombatEnemyOutcome& outcome = sharedCombatEnemyOutcomes[entityId];
+            outcome.sequence += 1;
+            if (outcome.sequence == 0) {
+                outcome.sequence = 1;
+            }
+            outcome.damageEffect = damageEffect;
+            outcome.damage = std::max<uint8_t>(damage, 1);
+            outcome.damageFlags = damageFlags;
+        }
+        return;
+    }
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsRemoteTimelineCompatible()) {
+        return;
+    }
+    localSharedCombatEnemies[entityId] = actor;
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot == actorSnapshots.end()) {
+        return;
+    }
+    if (!snapshot->second.alive) {
+        ClearLocalTarget(actor);
+        Actor_Kill(actor);
+        ClearPendingGuestAttack(entityId);
+        lastGuestAttackTick.erase(entityId);
+        genericGuestTargetsHitThisSwing.erase(entityId);
+        localSharedCombatEnemies.erase(entityId);
+        sharedCombatEnemyOutcomes.erase(entityId);
+        appliedSharedCombatEnemyOutcomeSequences.erase(entityId);
+        *shouldUpdate = false;
+        return;
+    }
+
+    uint32_t outcomeSequence = 0;
+    uint8_t damageEffect = 0;
+    uint8_t damage = 0;
+    uint32_t damageFlags = 0;
+    if (DecodeSharedCombatEnemyOutcome(snapshot->second, &outcomeSequence, &damageEffect, &damage, &damageFlags) &&
+        IsNewSharedCombatEnemyOutcome(appliedSharedCombatEnemyOutcomeSequences[entityId], outcomeSequence)) {
+        if (ApplySharedCombatEnemyDamage(actor, damageEffect, damage, damageFlags)) {
+            appliedSharedCombatEnemyOutcomeSequences[entityId] = outcomeSequence;
+        }
+    }
+
+    Player* player = GET_PLAYER(gPlayState);
+    if (player != nullptr && player->meleeWeaponState > 0 && !genericGuestTargetsHitThisSwing.contains(entityId) &&
+        !pendingGuestAttacks.contains(entityId) &&
+        ConsumeSharedCombatEnemyDamage(actor, &damageEffect, &damage, &damageFlags)) {
+        genericGuestTargetsHitThisSwing.insert(entityId);
+        pendingGuestAttacks.insert(entityId);
+        lastGuestAttackTick[entityId] = frameCounter;
+        SendAttackIntent(entityId, gPlayState->sceneNum, kSharedCombatAttackKind, damageEffect,
+                         std::max<uint8_t>(damage, 1), damageFlags);
+    }
+
+    actor->colChkInfo.health = std::max<int16_t>(0, snapshot->second.health);
+}
+
+void Manager::ForgetSharedCombatEnemy(void* actorRef) {
+    for (auto iterator = localSharedCombatEnemies.begin(); iterator != localSharedCombatEnemies.end();) {
+        if (iterator->second == actorRef) {
+            ClearPendingGuestAttack(iterator->first);
+            lastGuestAttackTick.erase(iterator->first);
+            genericGuestTargetsHitThisSwing.erase(iterator->first);
+            sharedCombatEnemyOutcomes.erase(iterator->first);
+            appliedSharedCombatEnemyOutcomeSequences.erase(iterator->first);
+            iterator = localSharedCombatEnemies.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
+void Manager::SendPushBlockSnapshot(void* actorRef, uint64_t acknowledgedRequestId) {
+    if (transport.GetRole() != SessionRole::Host || !handshakeComplete || actorRef == nullptr ||
+        gPlayState == nullptr) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    ActorSnapshotMessage message =
+        CapturePushBlockSnapshot(actor, gPlayState->sceneNum, frameCounter, sessionScope);
+    message.acknowledgedRequestId = acknowledgedRequestId;
+    actorSnapshots[message.entityId] = message;
+    localPushBlocks[message.entityId] = actor;
+    if (acknowledgedRequestId != 0) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    }
+}
+
+void Manager::UpdatePushBlock(void* actorRef) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    if (actor == nullptr || actor->id != ACTOR_OBJ_OSHIHIKI || gPlayState == nullptr) {
+        return;
+    }
+    const uint64_t entityId = GetGenericEnemyEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    const bool firstSnapshot = !localPushBlocks.contains(entityId);
+    localPushBlocks[entityId] = actor;
+    if (transport.GetRole() == SessionRole::Host) {
+        HyruleCoopPushBlockState state = {};
+        const bool active = HyruleCoop_ObjOshihikiCaptureState(actor, &state) &&
+                            state.phase != HYRULE_COOP_PUSH_BLOCK_ON_SCENE;
+        const uint32_t interval = active ? 3 : 120;
+        if (handshakeComplete && (firstSnapshot || frameCounter % interval == 0)) {
+            SendPushBlockSnapshot(actor);
+        }
+        return;
+    }
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsRemoteTimelineCompatible()) {
+        return;
+    }
+    float direction = 0.0f;
+    if (HyruleCoop_ObjOshihikiPeekPush(actor, &direction) && !pendingActorInteractionRequests.contains(entityId)) {
+        SendActorInteractionIntent(entityId, gPlayState->sceneNum, ActorInteractionKind::PushBlockBegin, direction);
+    }
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot != actorSnapshots.end() && !pendingActorInteractionRequests.contains(entityId)) {
+        ApplyPushBlockSnapshot(actor, snapshot->second);
+    }
+}
+
+void Manager::ForgetPushBlock(void* actorRef) {
+    for (auto iterator = localPushBlocks.begin(); iterator != localPushBlocks.end();) {
+        if (iterator->second == actorRef) {
+            ClearPendingActorInteraction(iterator->first);
+            iterator = localPushBlocks.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+}
+
+void Manager::SendDampeRaceSnapshot(void* actorRef, uint64_t acknowledgedRequestId) {
+    if (transport.GetRole() != SessionRole::Host || !handshakeComplete || actorRef == nullptr ||
+        gPlayState == nullptr) {
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(actorRef);
+    ActorSnapshotMessage message =
+        CaptureDampeRaceSnapshot(actor, gPlayState->sceneNum, frameCounter, sessionScope);
+    message.acknowledgedRequestId = acknowledgedRequestId;
+    actorSnapshots[message.entityId] = message;
+    localDampeRaceActors[message.entityId] = actor;
+    if (acknowledgedRequestId != 0) {
+        transport.SendAcknowledgedRealtime(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    } else {
+        transport.Send(MessageType::ActorSnapshot, EncodeActorSnapshot(message), message.entityId);
+    }
+}
+
+void Manager::UpdateDampeRaceActor(void* actorRef) {
+    Actor* actor = static_cast<Actor*>(actorRef);
+    if (actor == nullptr || !IsDampeRaceActorId(actor->id) || gPlayState == nullptr) {
+        return;
+    }
+    const uint64_t entityId = GetGenericEnemyEntityId(actor, gPlayState->sceneNum, sessionScope.worldGeneration);
+    localDampeRaceActors[entityId] = actor;
+    if (transport.GetRole() == SessionRole::Host) {
+        if (handshakeComplete && frameCounter % 3 == 0) {
+            SendDampeRaceSnapshot(actor);
+        }
+        return;
+    }
+    if (transport.GetRole() != SessionRole::Client || !handshakeComplete || !IsRemoteTimelineCompatible()) {
+        return;
+    }
+    if (actor->id == ACTOR_EN_PO_RELAY && HyruleCoop_DampeRaceConsumeStartRequest(actor) &&
+        !pendingActorInteractionRequests.contains(entityId)) {
+        SendActorInteractionIntent(entityId, gPlayState->sceneNum, ActorInteractionKind::DampeRaceStart);
+    }
+    const auto snapshot = actorSnapshots.find(entityId);
+    if (snapshot != actorSnapshots.end() && !pendingActorInteractionRequests.contains(entityId)) {
+        ApplyDampeRaceSnapshot(actor, snapshot->second);
+    }
+}
+
+void Manager::ForgetDampeRaceActor(void* actorRef) {
+    for (auto iterator = localDampeRaceActors.begin(); iterator != localDampeRaceActors.end();) {
+        if (iterator->second == actorRef) {
+            ClearPendingActorInteraction(iterator->first);
+            iterator = localDampeRaceActors.erase(iterator);
         } else {
             ++iterator;
         }
@@ -4013,6 +4856,69 @@ void Manager::ReconcileKingZora(void* actorRef) {
     }
 }
 
+void Manager::ReconcileAuthoritativeSceneActor(void* actorRef) {
+    // Either participant may perform the event. Reconcile both peers from the
+    // host-owned flags so guest-originated songs also update the host's live
+    // actor instead of waiting for an area reload.
+    if (!handshakeComplete || !IsSaveLoaded() || actorRef == nullptr || gPlayState == nullptr) {
+        return;
+    }
+
+    Actor* actor = static_cast<Actor*>(actorRef);
+    switch (actor->id) {
+        case ACTOR_OBJ_TIMEBLOCK: {
+            ObjTimeblock* block = static_cast<ObjTimeblock*>(actorRef);
+            if (block->unk_177 == 0 || block->demoEffectFirstPartTimer > 0) {
+                return;
+            }
+            const uint8_t switchValue = Flags_GetSwitch(gPlayState, block->dyna.actor.params & 0x3F) ? 1 : 0;
+            if (block->unk_174 == switchValue) {
+                return;
+            }
+            block->unk_174 = switchValue;
+            block->isVisible = ObjTimeblock_CalculateIsVisible(block);
+            if ((block->dyna.actor.params >> 10) & 1) {
+                if (block->isVisible) {
+                    ObjTimeblock_SetupAltBehaviorVisible(block);
+                } else {
+                    ObjTimeblock_SetupAltBehaviourNotVisible(block);
+                }
+            } else {
+                ObjTimeblock_SetupNormal(block);
+            }
+            break;
+        }
+        case ACTOR_EN_MD: {
+            if (gPlayState->sceneNum != SCENE_LOST_WOODS ||
+                !Flags_GetEventChkInf(EVENTCHKINF_PLAYED_SARIAS_SONG_FOR_MIDO_AS_ADULT)) {
+                return;
+            }
+            EnMd* mido = static_cast<EnMd*>(actorRef);
+            if (mido->actionFunc == EnMd_Idle) {
+                return;
+            }
+            if (EnMd_SetMovedPos(mido, gPlayState)) {
+                mido->actor.prevPos = mido->actor.world.pos;
+                mido->actor.speedXZ = 0.0f;
+                mido->interactInfo.talkState = NPC_TALK_STATE_IDLE;
+                mido->actionFunc = EnMd_Idle;
+            }
+            break;
+        }
+        case ACTOR_BG_SPOT02_OBJECTS: {
+            BgSpot02Objects* graveyardObject = static_cast<BgSpot02Objects*>(actorRef);
+            if (gPlayState->sceneNum == SCENE_GRAVEYARD &&
+                Flags_GetEventChkInf(EVENTCHKINF_DESTROYED_ROYAL_FAMILY_TOMB) &&
+                (graveyardObject->dyna.actor.params == 2 || graveyardObject->dyna.actor.params == 3)) {
+                Actor_Kill(&graveyardObject->dyna.actor);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 void Manager::ReconcileZorasFountainBombableWall(void* actorRef) {
     if (!IsSaveLoaded() || actorRef == nullptr || gPlayState->sceneNum != SCENE_ZORAS_FOUNTAIN) {
         return;
@@ -4121,6 +5027,67 @@ void Manager::DestroyRemotePlayer() {
         Actor_Kill(actor);
     }
     remotePlayer = nullptr;
+}
+
+void Manager::RefreshRemoteHorse() {
+    if (!IsSaveLoaded() || !handshakeComplete || !remotePlayerSnapshot.has_value() ||
+        !remotePlayerSnapshot->mounted) {
+        DestroyRemoteHorse();
+        return;
+    }
+    if (remoteHorse != nullptr || preparingRemoteHorse || gPlayState == nullptr) {
+        return;
+    }
+
+    ReclaimRemoteHorseActor();
+    if (remoteHorse != nullptr) {
+        return;
+    }
+
+    const PlayerSnapshotMessage& state = remotePlayerSnapshot.value();
+    if (!IsRemotePlayerVisibleInRoom(gPlayState->sceneNum, gPlayState->roomCtx.curRoom.num, state.scene,
+                                     state.room, GetLocalTimelineScope(), SnapshotTimelineScope(state))) {
+        return;
+    }
+
+    preparingRemoteHorse = true;
+    remoteHorse = Actor_Spawn(&gPlayState->actorCtx, gPlayState, ACTOR_EN_HORSE, state.horsePosition[0],
+                              state.horsePosition[1], state.horsePosition[2], state.horseRotation[0],
+                              state.horseRotation[1], state.horseRotation[2], 1);
+    preparingRemoteHorse = false;
+}
+
+void Manager::ReclaimRemoteHorseActor() {
+    if (gPlayState == nullptr) {
+        return;
+    }
+
+    const int16_t activeRoom = gPlayState->roomCtx.curRoom.num;
+    Actor* survivor = nullptr;
+    for (Actor* actor = gPlayState->actorCtx.actorLists[ACTORCAT_BG].head; actor != nullptr;) {
+        Actor* next = actor->next;
+        if (actor->update == HyruleCoopRemoteHorse_Update) {
+            if (survivor == nullptr && IsRemotePlayerActorInActiveRoom(actor->room, activeRoom)) {
+                survivor = actor;
+            } else {
+                Actor_Kill(actor);
+            }
+        }
+        actor = next;
+    }
+    remoteHorse = survivor;
+}
+
+void Manager::DestroyRemoteHorse() {
+    if (remoteHorse == nullptr || gPlayState == nullptr) {
+        remoteHorse = nullptr;
+        return;
+    }
+    Actor* actor = static_cast<Actor*>(remoteHorse);
+    if (actor->update == HyruleCoopRemoteHorse_Update) {
+        Actor_Kill(actor);
+    }
+    remoteHorse = nullptr;
 }
 
 bool Manager::IsRemoteTimelineCompatible() const {
@@ -4300,14 +5267,14 @@ void Manager::UpdateStoryEvent() {
     }
 }
 
-void Manager::BeginReconnectBarrier() {
+void Manager::BeginHandshakeBarrier() {
     if (!handshakeComplete || transport.GetRole() != SessionRole::Host || !IsSaveLoaded()) {
         return;
     }
     BarrierState state;
     state.operationEpoch = nextOperationEpoch++;
     state.scope = sessionScope;
-    state.kind = BarrierKind::ReconnectSnapshot;
+    state.kind = pendingHandshakeBarrierKind;
     state.phase = BarrierPhase::Prepare;
     state.manifestHash = HashCapabilities(negotiatedCapabilities);
     state.targetScene = gPlayState->sceneNum;
@@ -6164,4 +7131,9 @@ extern "C" int HyruleCoop_ShouldProcessStalchildHit(void* actor, void* attacker)
         return 1;
     }
     return HyruleCoop::Manager::Instance->ShouldProcessStalchildHit(actor, attacker);
+}
+
+extern "C" int HyruleCoop_ShouldSuppressSharedEnemyLocalReward(void* actor) {
+    return HyruleCoop::Manager::Instance != nullptr &&
+           HyruleCoop::Manager::Instance->ShouldSuppressSharedEnemyLocalReward(actor);
 }

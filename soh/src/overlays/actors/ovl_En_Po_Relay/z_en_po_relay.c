@@ -9,6 +9,7 @@
 #include "objects/object_tk/object_tk.h"
 #include "soh/Enhancements/game-interactor/GameInteractor.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
+#include "soh/Network/HyruleCoop/DampeRaceBridge.h"
 
 #define FLAGS                                                                                  \
     (ACTOR_FLAG_ATTENTION_ENABLED | ACTOR_FLAG_FRIENDLY | ACTOR_FLAG_UPDATE_CULLING_DISABLED | \
@@ -26,6 +27,11 @@ void EnPoRelay_Talk(EnPoRelay* this, PlayState* play);
 void EnPoRelay_Talk2(EnPoRelay* this, PlayState* play);
 void EnPoRelay_DisappearAndReward(EnPoRelay* this, PlayState* play);
 void EnPoRelay_SetupIdle(EnPoRelay* this);
+
+static void EnPoRelay_ApplyCoopAction(EnPoRelay* this, u8 action);
+static void EnPoRelay_UpdateReplica(EnPoRelay* this, PlayState* play);
+static void EnPoRelay_UpdateReplicaIdle(EnPoRelay* this, PlayState* play);
+static void EnPoRelay_UpdateReplicaTalk(EnPoRelay* this, PlayState* play);
 
 static Vec3s D_80AD8C30[] = {
     { 0xFFC4, 0xFDEE, 0xF47A }, { 0x0186, 0xFE0C, 0xF47A }, { 0x0186, 0xFE0C, 0xF0F6 }, { 0x00D2, 0xFDEE, 0xF0F6 },
@@ -89,6 +95,17 @@ static void* sEyesTextures[] = {
     gDampeEyeClosedTex,
 };
 
+static int sHyruleCoopDampeRaceLocalAuthority = 1;
+static const EnPoRelay* sHyruleCoopDampeRaceStartRequest = NULL;
+
+void HyruleCoop_DampeRaceSetLocalAuthority(int authoritative) {
+    sHyruleCoopDampeRaceLocalAuthority = authoritative != 0;
+}
+
+int HyruleCoop_DampeRaceIsLocalAuthority(void) {
+    return sHyruleCoopDampeRaceLocalAuthority;
+}
+
 void EnPoRelay_Init(Actor* thisx, PlayState* play) {
     EnPoRelay* this = (EnPoRelay*)thisx;
     s32 temp;
@@ -102,6 +119,9 @@ void EnPoRelay_Init(Actor* thisx, PlayState* play) {
     Lights_PointNoGlowSetInfo(&this->lightInfo, this->actor.home.pos.x, this->actor.home.pos.y, this->actor.home.pos.z,
                               255, 255, 255, 200);
     this->lightColor.a = 255;
+    this->coopAction = HYRULE_COOP_DAMPE_GHOST_IDLE;
+    this->coopReplica = 0;
+    this->coopGuestTalk = 0;
     temp = 1;
     if (D_80AD8D24 != 0) {
         Actor_Kill(&this->actor);
@@ -117,6 +137,9 @@ void EnPoRelay_Init(Actor* thisx, PlayState* play) {
 void EnPoRelay_Destroy(Actor* thisx, PlayState* play) {
     EnPoRelay* this = (EnPoRelay*)thisx;
 
+    if (sHyruleCoopDampeRaceStartRequest == this) {
+        sHyruleCoopDampeRaceStartRequest = NULL;
+    }
     D_80AD8D24 = 0;
     LightContext_RemoveLight(play, &play->lightCtx, this->lightNode);
     Collider_DestroyCylinder(play, &this->collider);
@@ -130,6 +153,7 @@ void EnPoRelay_SetupIdle(EnPoRelay* this) {
     this->actor.world.rot.y = -0x8000;
     this->actor.colChkInfo.mass = MASS_HEAVY;
     this->actionFunc = EnPoRelay_Idle;
+    this->coopAction = HYRULE_COOP_DAMPE_GHOST_IDLE;
 }
 
 void EnPoRelay_Vec3sToVec3f(Vec3f* dest, Vec3s* src) {
@@ -150,6 +174,7 @@ void EnPoRelay_SetupRace(EnPoRelay* this) {
     this->actor.flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_PO_LAUGH);
     this->actionFunc = EnPoRelay_Race;
+    this->coopAction = HYRULE_COOP_DAMPE_GHOST_RACE;
 }
 
 void EnPoRelay_SetupEndRace(EnPoRelay* this) {
@@ -157,6 +182,7 @@ void EnPoRelay_SetupEndRace(EnPoRelay* this) {
     this->actor.flags &= ~ACTOR_FLAG_LOCK_ON_DISABLED;
     this->actor.speedXZ = 0.0f;
     this->actionFunc = EnPoRelay_EndRace;
+    this->coopAction = HYRULE_COOP_DAMPE_GHOST_END_RACE;
 }
 
 void EnPoRelay_CorrectY(EnPoRelay* this) {
@@ -169,6 +195,7 @@ void EnPoRelay_Idle(EnPoRelay* this, PlayState* play) {
     if (Actor_ProcessTalkRequest(&this->actor, play)) {
         this->actor.flags &= ~ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED;
         this->actionFunc = EnPoRelay_Talk;
+        this->coopAction = HYRULE_COOP_DAMPE_GHOST_TALK;
     } else if (this->actor.xzDistToPlayer < 250.0f) {
         this->actor.flags |= ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED;
         this->actor.textId = this->textId;
@@ -267,6 +294,7 @@ void EnPoRelay_EndRace(EnPoRelay* this, PlayState* play) {
     Math_ScaledStepToS(&this->actor.shape.rot.y, -0x4000, 0x800);
     if (Actor_ProcessTalkRequest(&this->actor, play)) {
         this->actionFunc = EnPoRelay_Talk2;
+        this->coopAction = HYRULE_COOP_DAMPE_GHOST_TALK2;
     } else if (play->roomCtx.curRoom.num == 5) {
         Actor_Kill(&this->actor);
         gSaveContext.timerState = TIMER_STATE_OFF;
@@ -293,6 +321,7 @@ void EnPoRelay_Talk2(EnPoRelay* this, PlayState* play) {
         gSaveContext.timerState = TIMER_STATE_OFF;
         this->actionTimer = 0;
         this->actionFunc = EnPoRelay_DisappearAndReward;
+        this->coopAction = HYRULE_COOP_DAMPE_GHOST_DISAPPEAR;
     }
     Actor_PlaySfx_Flagged(&this->actor, NA_SE_EN_PO_FLY - SFX_FLAG);
 }
@@ -361,6 +390,15 @@ void EnPoRelay_Update(Actor* thisx, PlayState* play) {
     EnPoRelay* this = (EnPoRelay*)thisx;
     s32 pad;
 
+    if (!HyruleCoop_DampeRaceIsLocalAuthority()) {
+        EnPoRelay_UpdateReplica(this, play);
+        return;
+    }
+    if (this->coopReplica) {
+        EnPoRelay_ApplyCoopAction(this, this->coopAction);
+        this->coopReplica = 0;
+    }
+
     SkelAnime_Update(&this->skelAnime);
     this->actionFunc(this, play);
     Actor_MoveXZGravity(&this->actor);
@@ -379,6 +417,171 @@ void EnPoRelay_Update(Actor* thisx, PlayState* play) {
     if (this->eyeTextureIdx == 3) {
         this->eyeTextureIdx = 0;
     }
+}
+
+static void EnPoRelay_ApplyCoopAction(EnPoRelay* this, u8 action) {
+    this->coopAction = action;
+    switch (action) {
+        case HYRULE_COOP_DAMPE_GHOST_IDLE:
+            this->actor.flags &= ~ACTOR_FLAG_LOCK_ON_DISABLED;
+            this->actionFunc = EnPoRelay_Idle;
+            break;
+        case HYRULE_COOP_DAMPE_GHOST_TALK:
+            this->actor.flags &= ~ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED;
+            this->actionFunc = EnPoRelay_Talk;
+            break;
+        case HYRULE_COOP_DAMPE_GHOST_RACE:
+            this->actor.flags |= ACTOR_FLAG_LOCK_ON_DISABLED;
+            this->actionFunc = EnPoRelay_Race;
+            break;
+        case HYRULE_COOP_DAMPE_GHOST_END_RACE:
+            this->actor.flags &= ~ACTOR_FLAG_LOCK_ON_DISABLED;
+            this->actionFunc = EnPoRelay_EndRace;
+            break;
+        case HYRULE_COOP_DAMPE_GHOST_TALK2:
+            this->actionFunc = EnPoRelay_Talk2;
+            break;
+        case HYRULE_COOP_DAMPE_GHOST_DISAPPEAR:
+            this->actionFunc = EnPoRelay_DisappearAndReward;
+            break;
+        default:
+            this->coopAction = HYRULE_COOP_DAMPE_GHOST_IDLE;
+            this->actionFunc = EnPoRelay_Idle;
+            break;
+    }
+}
+
+static void EnPoRelay_UpdateReplica(EnPoRelay* this, PlayState* play) {
+    SkelAnime_Update(&this->skelAnime);
+    Collider_UpdateCylinder(&this->actor, &this->collider);
+    CollisionCheck_SetOC(play, &play->colChkCtx, &this->collider.base);
+    Actor_SetFocus(&this->actor, 50.0f);
+
+    if (this->coopGuestTalk) {
+        EnPoRelay_UpdateReplicaTalk(this, play);
+    } else if (this->coopAction == HYRULE_COOP_DAMPE_GHOST_IDLE) {
+        EnPoRelay_UpdateReplicaIdle(this, play);
+    }
+
+    if (this->coopAction == HYRULE_COOP_DAMPE_GHOST_RACE) {
+        Actor_PlaySfx_Flagged(&this->actor, NA_SE_EN_PO_AWAY - SFX_FLAG);
+    } else {
+        Actor_PlaySfx_Flagged(&this->actor, NA_SE_EN_PO_FLY - SFX_FLAG);
+    }
+}
+
+static void EnPoRelay_UpdateReplicaIdle(EnPoRelay* this, PlayState* play) {
+    Math_ScaledStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 0x100);
+    if (Actor_ProcessTalkRequest(&this->actor, play)) {
+        this->actor.flags &= ~ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED;
+        this->coopGuestTalk = 1;
+    } else if (this->actor.xzDistToPlayer < 250.0f) {
+        this->actor.flags |= ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED;
+        this->actor.textId = this->textId;
+        Actor_OfferTalk(&this->actor, play, 250.0f);
+    }
+}
+
+static void EnPoRelay_UpdateReplicaTalk(EnPoRelay* this, PlayState* play) {
+    Math_ScaledStepToS(&this->actor.shape.rot.y, this->actor.yawTowardsPlayer, 0x100);
+    if (Actor_TextboxIsClosing(&this->actor, play)) {
+        sHyruleCoopDampeRaceStartRequest = this;
+        this->actor.flags &= ~ACTOR_FLAG_TALK_OFFER_AUTO_ACCEPTED;
+        this->coopGuestTalk = 0;
+    }
+}
+
+int HyruleCoop_DampeRaceConsumeStartRequest(const void* actorRef) {
+    if (actorRef == NULL || sHyruleCoopDampeRaceStartRequest != actorRef) {
+        return 0;
+    }
+    sHyruleCoopDampeRaceStartRequest = NULL;
+    return 1;
+}
+
+int HyruleCoop_DampeRaceBeginHostRace(void* actorRef, void* playRef) {
+    EnPoRelay* this = actorRef;
+    PlayState* play = playRef;
+
+    if (!HyruleCoop_DampeRaceIsLocalAuthority() || this == NULL || play == NULL || this->actor.id != ACTOR_EN_PO_RELAY ||
+        this->coopAction == HYRULE_COOP_DAMPE_GHOST_RACE || this->coopAction == HYRULE_COOP_DAMPE_GHOST_DISAPPEAR) {
+        return 0;
+    }
+    Actor_SetTextWithPrefix(play, &this->actor, 0x2F);
+    this->textId = this->actor.textId;
+    EnPoRelay_SetupRace(this);
+    return 1;
+}
+
+int HyruleCoop_DampeRaceCaptureGhostState(const void* actorRef, HyruleCoopDampeRaceGhostState* state) {
+    const EnPoRelay* this = actorRef;
+
+    if (this == NULL || state == NULL || this->actor.id != ACTOR_EN_PO_RELAY ||
+        this->coopAction >= HYRULE_COOP_DAMPE_GHOST_ACTION_COUNT) {
+        return 0;
+    }
+    state->action = this->coopAction;
+    state->hookshotSlotFull = this->hookshotSlotFull;
+    state->bobTimer = this->bobTimer;
+    state->eyeTextureIdx = this->eyeTextureIdx;
+    state->actionTimer = this->actionTimer;
+    state->pathIndex = this->pathIndex;
+    state->yawTowardsPathPoint = this->yawTowardsPathPoint;
+    state->worldRotY = this->actor.world.rot.y;
+    state->shapeRotY = this->actor.shape.rot.y;
+    state->textId = this->textId;
+    state->timerState = gSaveContext.timerState;
+    state->timerSeconds = gSaveContext.timerSeconds;
+    state->worldPosX = this->actor.world.pos.x;
+    state->worldPosY = this->actor.world.pos.y;
+    state->worldPosZ = this->actor.world.pos.z;
+    state->homePosY = this->actor.home.pos.y;
+    state->speedXZ = this->actor.speedXZ;
+    state->scale = this->actor.scale.x;
+    state->animationFrame = this->skelAnime.curFrame;
+    state->animationSpeed = this->skelAnime.playSpeed;
+    return 1;
+}
+
+int HyruleCoop_DampeRaceApplyGhostState(void* actorRef, void* playRef, const HyruleCoopDampeRaceGhostState* state) {
+    EnPoRelay* this = actorRef;
+    PlayState* play = playRef;
+
+    if (this == NULL || play == NULL || state == NULL || this->actor.id != ACTOR_EN_PO_RELAY ||
+        state->action >= HYRULE_COOP_DAMPE_GHOST_ACTION_COUNT) {
+        return 0;
+    }
+    this->coopAction = state->action;
+    this->coopReplica = 1;
+    if (state->action >= HYRULE_COOP_DAMPE_GHOST_RACE) {
+        this->coopGuestTalk = 0;
+        if (sHyruleCoopDampeRaceStartRequest == this) {
+            sHyruleCoopDampeRaceStartRequest = NULL;
+        }
+    }
+    this->hookshotSlotFull = state->hookshotSlotFull;
+    this->bobTimer = state->bobTimer;
+    this->eyeTextureIdx = state->eyeTextureIdx;
+    this->actionTimer = state->actionTimer;
+    this->pathIndex = state->pathIndex;
+    this->yawTowardsPathPoint = state->yawTowardsPathPoint;
+    this->actor.world.rot.y = state->worldRotY;
+    this->actor.shape.rot.y = state->shapeRotY;
+    this->textId = state->textId;
+    this->actor.textId = state->textId;
+    this->actor.world.pos.x = state->worldPosX;
+    this->actor.world.pos.y = state->worldPosY;
+    this->actor.world.pos.z = state->worldPosZ;
+    this->actor.home.pos.y = state->homePosY;
+    this->actor.speedXZ = state->speedXZ;
+    this->actor.scale.x = state->scale;
+    this->actor.scale.y = state->scale;
+    this->actor.scale.z = state->scale;
+    this->skelAnime.curFrame = state->animationFrame;
+    this->skelAnime.playSpeed = state->animationSpeed;
+    gSaveContext.timerState = state->timerState;
+    gSaveContext.timerSeconds = state->timerSeconds;
+    return 1;
 }
 
 void EnPoRelay_PostLimbDraw(PlayState* play, s32 limbIndex, Gfx** dList, Vec3s* rot, void* thisx) {

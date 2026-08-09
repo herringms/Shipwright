@@ -19,6 +19,20 @@ constexpr size_t kBottleCount = 4;
 constexpr uint32_t kScaleMask = 0x00000E00;
 constexpr uint8_t kScaleShift = 9;
 
+constexpr std::array<SongProgressionMapping, 11> kDurableSongMappings = {{
+    { EVENTCHKINF_LEARNED_MINUET_OF_FOREST, QUEST_SONG_MINUET },
+    { EVENTCHKINF_LEARNED_BOLERO_OF_FIRE, QUEST_SONG_BOLERO },
+    { EVENTCHKINF_LEARNED_SERENADE_OF_WATER, QUEST_SONG_SERENADE },
+    { EVENTCHKINF_LEARNED_REQUIEM_OF_SPIRIT, QUEST_SONG_REQUIEM },
+    { EVENTCHKINF_LEARNED_NOCTURNE_OF_SHADOW, QUEST_SONG_NOCTURNE },
+    { EVENTCHKINF_LEARNED_PRELUDE_OF_LIGHT, QUEST_SONG_PRELUDE },
+    { EVENTCHKINF_LEARNED_ZELDAS_LULLABY, QUEST_SONG_LULLABY },
+    { EVENTCHKINF_LEARNED_SARIAS_SONG, QUEST_SONG_SARIA },
+    { EVENTCHKINF_LEARNED_SUNS_SONG, QUEST_SONG_SUN },
+    { EVENTCHKINF_LEARNED_SONG_OF_TIME, QUEST_SONG_TIME },
+    { EVENTCHKINF_LEARNED_SONG_OF_STORMS, QUEST_SONG_STORMS },
+}};
+
 bool HasPackedFlag(const uint16_t* flags, uint16_t flag) {
     return (flags[flag >> 4] & (1u << (flag & 0xF))) != 0;
 }
@@ -82,11 +96,14 @@ void ReconcileDurableRewardInvariants(SaveContext* saveContext) {
             (saveContext->inventory.upgrades & ~kScaleMask) | (1u << kScaleShift);
     }
 
-    // The escape cutscene records this event before the song reward is fully
-    // committed. If a peer or save occurs in that window, the durable event
-    // can survive while the quest bit is lost, permanently blocking progress.
-    if (HasPackedFlag(saveContext->eventChkInf, EVENTCHKINF_LEARNED_SONG_OF_TIME)) {
-        saveContext->inventory.questItems |= (1u << QUEST_SONG_TIME);
+    // Song cutscenes can set the event flag before the quest-item bit is
+    // committed. Rebuild every campaign-owned song bit from its durable event
+    // so a peer or area transition cannot strand either player without it.
+    std::array<uint16_t, 14> eventFlags;
+    std::copy(std::begin(saveContext->eventChkInf), std::end(saveContext->eventChkInf), eventFlags.begin());
+    for (const SongProgressionMapping& mapping : kDurableSongMappings) {
+        PromoteEventFlagToQuestItem(eventFlags, saveContext->inventory.questItems, mapping.eventFlag,
+                                    mapping.questBit);
     }
 
     // A synchronized chest flag must never strand a peer without the fixed
@@ -183,13 +200,16 @@ void ApplySharedProgression(void* saveContextRef, const SharedProgressionState& 
     }
     saveContext->inventory.items[SLOT_TRADE_ADULT] = state.tradeItems[0];
     saveContext->inventory.items[SLOT_TRADE_CHILD] = state.tradeItems[1];
-    for (size_t index = 0; index < kBottleCount; ++index) {
-        uint8_t& item = saveContext->inventory.items[SLOT_BOTTLE_1 + index];
-        const bool canonicalBottle = (state.bottleOwnershipMask & (1u << index)) != 0;
-        if (!canonicalBottle) {
-            item = ITEM_NONE;
-        } else if (item == ITEM_NONE) {
-            item = ITEM_BOTTLE;
+    std::array<uint8_t, kBottleCount> localBottleItems = {};
+    std::copy_n(&saveContext->inventory.items[SLOT_BOTTLE_1], kBottleCount, localBottleItems.begin());
+    const std::array<uint8_t, kBottleCount> mergedBottleItems =
+        MergeBottleOwnership(localBottleItems, state.bottleOwnershipMask, ITEM_NONE, ITEM_BOTTLE);
+    std::copy(mergedBottleItems.begin(), mergedBottleItems.end(),
+              &saveContext->inventory.items[SLOT_BOTTLE_1]);
+    for (size_t button = 0; button < std::size(saveContext->equips.cButtonSlots); ++button) {
+        const uint8_t slot = saveContext->equips.cButtonSlots[button];
+        if (slot >= SLOT_BOTTLE_1 && slot <= SLOT_BOTTLE_4) {
+            saveContext->equips.buttonItems[button + 1] = saveContext->inventory.items[slot];
         }
     }
     saveContext->inventory.equipment = state.equipment;

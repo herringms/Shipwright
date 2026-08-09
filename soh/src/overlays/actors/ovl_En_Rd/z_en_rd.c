@@ -1,4 +1,5 @@
 #include "z_en_rd.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 #include "objects/object_rd/object_rd.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
@@ -728,7 +729,9 @@ void EnRd_Stunned(EnRd* this, PlayState* play) {
         if (this->actor.colChkInfo.health == 0) {
             EnRd_UpdateMourningTarget(play, &this->actor, 1);
             EnRd_SetupDead(this);
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x90);
+            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0x90);
+            }
         } else {
             EnRd_SetupDamaged(this);
         }
@@ -799,13 +802,54 @@ void EnRd_UpdateDamage(EnRd* this, PlayState* play) {
                 if (this->actor.colChkInfo.health == 0) {
                     EnRd_UpdateMourningTarget(play, &this->actor, 1);
                     EnRd_SetupDead(this);
-                    Item_DropCollectibleRandom(play, 0, &this->actor.world.pos, 0x90);
+                    if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                        Item_DropCollectibleRandom(play, 0, &this->actor.world.pos, 0x90);
+                    }
                 } else {
                     EnRd_SetupDamaged(this);
                 }
             }
         }
     }
+}
+
+static int EnRd_GetCoopDamage(const EnRd* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = this->collider.info.acHitInfo != NULL ? this->collider.info.acHitInfo->toucher.dmgFlags : 0;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnRdPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnRd_GetCoopDamage((const EnRd*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnRdConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnRd* this = (EnRd*)actorRef;
+    if (!EnRd_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->collider.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnRdApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags) {
+    EnRd* this = (EnRd*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 || (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->collider.base.acFlags |= AC_HIT;
+    EnRd_UpdateDamage(this, play);
+    return 1;
 }
 
 void EnRd_Update(Actor* thisx, PlayState* play) {

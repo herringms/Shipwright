@@ -30,6 +30,28 @@
 #include "soh/resource/type/scenecommand/SetEchoSettings.h"
 #include "soh/resource/type/scenecommand/SetAlternateHeaders.h"
 #include <spdlog/spdlog.h>
+#include <cstdlib>
+
+namespace {
+
+bool ForestRoomTraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("HYRULE_COOP_FOREST_ROOM_TRACE");
+        return value == nullptr || value[0] == '\0' || value[0] != '0';
+    }();
+    return enabled;
+}
+
+void TraceForestRoom(PlayState* play, const RoomContext* roomCtx, const char* phase) {
+    if (play->sceneNum != SCENE_FOREST_TEMPLE || !ForestRoomTraceEnabled()) {
+        return;
+    }
+
+    SPDLOG_INFO("[ForestRoomTrace] phase={} cur={} prev={} status={} frames={}", phase, roomCtx->curRoom.num,
+                roomCtx->prevRoom.num, roomCtx->status, play->gameplayFrames);
+}
+
+} // namespace
 
 extern Ship::IResource* OTRPlay_LoadFile(PlayState* play, const char* fileName);
 extern "C" s32 Object_Spawn(ObjectContext* objectCtx, s16 objectId);
@@ -471,12 +493,17 @@ extern "C" s32 OTRfunc_800973FC(PlayState* play, RoomContext* roomCtx) {
             roomCtx->curRoom.segment = roomCtx->unk_34;
             gSegments[3] = VIRTUAL_TO_PHYSICAL(roomCtx->unk_34);
 
+            TraceForestRoom(play, roomCtx, "load-ready");
             OTRScene_ExecuteCommands(play, (SOH::Scene*)roomCtx->roomToLoad);
+            TraceForestRoom(play, roomCtx, "commands-complete");
 
             Player_SetBootData(play, GET_PLAYER(play));
+            TraceForestRoom(play, roomCtx, "player-boot-complete");
             Actor_SpawnTransitionActors(play, &play->actorCtx);
+            TraceForestRoom(play, roomCtx, "transition-actors-complete");
 
             GameInteractor_ExecuteAfterSceneCommands(play->sceneNum);
+            TraceForestRoom(play, roomCtx, "after-scene-commands-complete");
 
             return 1;
         }
@@ -491,6 +518,7 @@ extern "C" s32 OTRRoom_RequestNewRoom(PlayState* play, RoomContext* roomCtx, s32
     u32 size;
 
     if (roomCtx->status == 0) {
+        TraceForestRoom(play, roomCtx, "request-begin");
         roomCtx->prevRoom = roomCtx->curRoom;
         roomCtx->curRoom.num = roomNum;
         roomCtx->curRoom.segment = NULL;
@@ -513,6 +541,8 @@ extern "C" s32 OTRRoom_RequestNewRoom(PlayState* play, RoomContext* roomCtx, s32
             ResourceMgr_GetResourceByNameHandlingMQ(play->roomList[roomNum].fileName));
         roomCtx->status = 1;
         roomCtx->roomToLoad = roomData.get();
+
+        TraceForestRoom(play, roomCtx, roomCtx->roomToLoad == nullptr ? "request-resource-missing" : "request-resource-ready");
 
         roomCtx->activeBufPage ^= 1;
 

@@ -25,6 +25,9 @@ typedef struct EnPoRelay {
     /* 0x027C */ LightNode* lightNode;
     /* 0x0280 */ LightInfo lightInfo;
     /* 0x0290 */ ColliderCylinder collider;
-} EnPoRelay; // size = 0x02DC
+    /* 0x02DC */ u8 coopAction;
+    /* 0x02DD */ u8 coopReplica;
+    /* 0x02DE */ u8 coopGuestTalk;
+} EnPoRelay; // size = 0x02E0
 
 #endif

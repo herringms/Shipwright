@@ -5,6 +5,7 @@
  */
 
 #include "z_en_mb.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 #include "objects/object_mb/object_mb.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
@@ -1129,7 +1130,9 @@ void EnMb_ClubDead(EnMb* this, PlayState* play) {
                                      9, true);
             }
         } else {
-            Item_DropCollectibleRandom(play, &this->actor, &effPos, 0xC0);
+            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &effPos, 0xC0);
+            }
             Actor_Kill(&this->actor);
         }
     } else if ((s32)this->skelAnime.curFrame == 15 || (s32)this->skelAnime.curFrame == 22) {
@@ -1365,7 +1368,9 @@ void EnMb_SpearDead(EnMb* this, PlayState* play) {
                                      true);
             }
         } else {
-            Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xE0);
+            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                Item_DropCollectibleRandom(play, &this->actor, &this->actor.world.pos, 0xE0);
+            }
             Actor_Kill(&this->actor);
         }
     }
@@ -1459,6 +1464,54 @@ void EnMb_CheckColliding(EnMb* this, PlayState* play) {
             }
         }
     }
+}
+
+static int EnMb_GetCoopDamage(const EnMb* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        !(this->hitbox.base.acFlags & AC_HIT) || (this->frontShielding.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = this->hitbox.info.acHitInfo != NULL ? this->hitbox.info.acHitInfo->toucher.dmgFlags : 0;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnMbPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnMb_GetCoopDamage((const EnMb*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnMbConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnMb* this = (EnMb*)actorRef;
+    if (this == NULL) {
+        return 0;
+    }
+    if (this->frontShielding.base.acFlags & AC_HIT) {
+        this->frontShielding.base.acFlags &= ~(AC_HIT | AC_BOUNCED);
+        this->hitbox.base.acFlags &= ~AC_HIT;
+        return 0;
+    }
+    if (!EnMb_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->hitbox.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnMbApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags) {
+    EnMb* this = (EnMb*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 || (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->frontShielding.base.acFlags &= ~(AC_HIT | AC_BOUNCED);
+    this->hitbox.base.acFlags |= AC_HIT;
+    EnMb_CheckColliding(this, play);
+    return 1;
 }
 
 void EnMb_Update(Actor* thisx, PlayState* play) {

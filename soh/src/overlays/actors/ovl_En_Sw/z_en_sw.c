@@ -1,4 +1,5 @@
 #include "z_en_sw.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 #include "objects/object_st/object_st.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
@@ -358,7 +359,9 @@ s32 func_80B0C9F0(EnSw* this, PlayState* play) {
                 this->actionFunc = func_80B0DB00;
             }
 
-            GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+            if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+                GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+            }
 
             Audio_PlayActorSound2(&this->actor, NA_SE_EN_STALWALL_DEAD);
             return true;
@@ -370,6 +373,46 @@ s32 func_80B0C9F0(EnSw* this, PlayState* play) {
     }
 
     return false;
+}
+
+static int EnSw_GetCoopDamage(const EnSw* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        !(this->collider.base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = this->collider.elements[0].info.acHitInfo != NULL
+                       ? this->collider.elements[0].info.acHitInfo->toucher.dmgFlags
+                       : 0;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnSwPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnSw_GetCoopDamage((const EnSw*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnSwConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnSw* this = (EnSw*)actorRef;
+    if (!EnSw_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->collider.base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnSwApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags) {
+    EnSw* this = (EnSw*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    (void)damageFlags;
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 || (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    this->collider.base.acFlags |= AC_HIT;
+    return func_80B0C9F0(this, play);
 }
 
 void func_80B0CBE8(EnSw* this, PlayState* play) {
@@ -623,9 +666,13 @@ void func_80B0D878(EnSw* this, PlayState* play) {
         x = (this->unk_364.x * 10.0f);
         y = (this->unk_364.y * 10.0f);
         z = (this->unk_364.z * 10.0f);
-        temp_v0 =
-            Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, ACTOR_EN_SI, this->actor.world.pos.x + x,
-                               this->actor.world.pos.y + y, this->actor.world.pos.z + z, 0, 0, 0, this->actor.params);
+        temp_v0 = NULL;
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            temp_v0 =
+                Actor_SpawnAsChild(&play->actorCtx, &this->actor, play, ACTOR_EN_SI, this->actor.world.pos.x + x,
+                                   this->actor.world.pos.y + y, this->actor.world.pos.z + z, 0, 0, 0,
+                                   this->actor.params);
+        }
         if (temp_v0 != NULL) {
             temp_v0->parent = NULL;
         }
@@ -680,7 +727,9 @@ void func_80B0DC7C(EnSw* this, PlayState* play) {
         this->actor.shape.rot.x += 0x1000;
         this->actor.shape.rot.z += 0x1000;
     } else {
-        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0x30);
+        }
         Actor_Kill(&this->actor);
     }
 }

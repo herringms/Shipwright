@@ -5,6 +5,7 @@
  */
 
 #include "z_en_st.h"
+#include "soh/Network/HyruleCoop/GenericEnemyBridge.h"
 #include "objects/object_st/object_st.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 
@@ -421,28 +422,9 @@ s32 EnSt_CheckHitFrontside(EnSt* this) {
     }
 }
 
-s32 EnSt_CheckHitBackside(EnSt* this, PlayState* play) {
-    ColliderCylinder* cyl = &this->colCylinder[0];
-    s32 flags = 0; // ac hit flags from colliders 0 and 1
-    s32 hit = false;
-
-    if (cyl->base.acFlags & AC_HIT) {
-        cyl->base.acFlags &= ~AC_HIT;
-        hit = true;
-        flags |= cyl->info.acHitInfo->toucher.dmgFlags;
-    }
-
-    cyl = &this->colCylinder[1];
-    if (cyl->base.acFlags & AC_HIT) {
-        cyl->base.acFlags &= ~AC_HIT;
-        hit = true;
-        flags |= cyl->info.acHitInfo->toucher.dmgFlags;
-    }
-
-    if (!hit) {
-        return false;
-    }
-
+static s32 EnSt_ApplyBacksideDamage(EnSt* this, PlayState* play, uint32_t flags) {
+    // Both native and co-op hit paths enter here after the collision flags have been consumed.
+    // Keeping the original action setup in one place preserves damage, stun, and death behavior.
     this->invulnerableTimer = 8;
     if (this->actor.colChkInfo.damageEffect == 1) {
         if (this->stunTimer == 0) {
@@ -468,7 +450,9 @@ s32 EnSt_CheckHitBackside(EnSt* this, PlayState* play) {
     this->deathTimer = 20;
     this->actor.gravity = -1.0f;
     Audio_PlayActorSound2(&this->actor, NA_SE_EN_STALWALL_DEAD);
-    GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+    if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+        GameInteractor_ExecuteOnEnemyDefeat(&this->actor);
+    }
 
     if (flags & 0x1F820) {
         // arrow, fire arrow, ice arrow, light arrow,
@@ -480,6 +464,31 @@ s32 EnSt_CheckHitBackside(EnSt* this, PlayState* play) {
     }
 
     return true;
+}
+
+s32 EnSt_CheckHitBackside(EnSt* this, PlayState* play) {
+    ColliderCylinder* cyl = &this->colCylinder[0];
+    uint32_t flags = 0; // ac hit flags from colliders 0 and 1
+    s32 hit = false;
+
+    if (cyl->base.acFlags & AC_HIT) {
+        cyl->base.acFlags &= ~AC_HIT;
+        hit = true;
+        flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+    }
+
+    cyl = &this->colCylinder[1];
+    if (cyl->base.acFlags & AC_HIT) {
+        cyl->base.acFlags &= ~AC_HIT;
+        hit = true;
+        flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+    }
+
+    if (!hit) {
+        return false;
+    }
+
+    return EnSt_ApplyBacksideDamage(this, play, flags);
 }
 
 /**
@@ -505,6 +514,68 @@ s32 EnSt_CheckColliders(EnSt* this, PlayState* play) {
         EnSt_CheckHitLink(this, play);
     }
     return false;
+}
+
+static int EnSt_GetCoopDamage(const EnSt* this, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    uint32_t flags = 0;
+    int hit = 0;
+    int i;
+
+    if (this == NULL || damageEffect == NULL || damage == NULL || damageFlags == NULL ||
+        (this->colCylinder[2].base.acFlags & AC_HIT)) {
+        return 0;
+    }
+    for (i = 0; i < 2; ++i) {
+        const ColliderCylinder* cyl = &this->colCylinder[i];
+        if (cyl->base.acFlags & AC_HIT) {
+            hit = 1;
+            if (cyl->info.acHitInfo != NULL) {
+                flags |= cyl->info.acHitInfo->toucher.dmgFlags;
+            }
+        }
+    }
+    if (!hit) {
+        return 0;
+    }
+    *damageEffect = this->actor.colChkInfo.damageEffect;
+    *damage = this->actor.colChkInfo.damage;
+    *damageFlags = flags;
+    return *damageEffect != 0 || *damage != 0;
+}
+
+int HyruleCoop_EnStPeekDamage(const void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    return EnSt_GetCoopDamage((const EnSt*)actorRef, damageEffect, damage, damageFlags);
+}
+
+int HyruleCoop_EnStConsumeDamage(void* actorRef, uint8_t* damageEffect, uint8_t* damage, uint32_t* damageFlags) {
+    EnSt* this = (EnSt*)actorRef;
+    if (this == NULL) {
+        return 0;
+    }
+    if (this->colCylinder[2].base.acFlags & AC_HIT) {
+        this->colCylinder[2].base.acFlags &= ~AC_HIT;
+        this->colCylinder[0].base.acFlags &= ~AC_HIT;
+        this->colCylinder[1].base.acFlags &= ~AC_HIT;
+        return 0;
+    }
+    if (!EnSt_GetCoopDamage(this, damageEffect, damage, damageFlags)) {
+        return 0;
+    }
+    this->colCylinder[0].base.acFlags &= ~AC_HIT;
+    this->colCylinder[1].base.acFlags &= ~AC_HIT;
+    return 1;
+}
+
+int HyruleCoop_EnStApplyDamage(void* actorRef, void* playRef, uint8_t damageEffect, uint8_t damage,
+                                uint32_t damageFlags) {
+    EnSt* this = (EnSt*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    if (this == NULL || play == NULL || this->actor.colChkInfo.health == 0 || (damageEffect == 0 && damage == 0)) {
+        return 0;
+    }
+    this->actor.colChkInfo.damageEffect = damageEffect;
+    this->actor.colChkInfo.damage = damage;
+    return EnSt_ApplyBacksideDamage(this, play, damageFlags);
 }
 
 void EnSt_SetColliderScale(EnSt* this) {
@@ -990,7 +1061,9 @@ void EnSt_Die(EnSt* this, PlayState* play) {
     if (DECR(this->finishDeathTimer) != 0) {
         EnSt_SpawnDeadEffect(this, play);
     } else {
-        Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
+        if (!HyruleCoop_ShouldSuppressSharedEnemyLocalReward(&this->actor)) {
+            Item_DropCollectibleRandom(play, NULL, &this->actor.world.pos, 0xE0);
+        }
         Actor_Kill(&this->actor);
     }
 }

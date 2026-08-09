@@ -5,6 +5,7 @@
  */
 
 #include "z_obj_oshihiki.h"
+#include "soh/Network/HyruleCoop/PushBlockBridge.h"
 #include "overlays/actors/ovl_Obj_Switch/z_obj_switch.h"
 #include "objects/gameplay_dangeon_keep/gameplay_dangeon_keep.h"
 #include "soh/ResourceManagerHelpers.h"
@@ -649,6 +650,112 @@ void ObjOshihiki_Update(Actor* thisx, PlayState* play) {
     if (this->actionFunc != NULL) {
         this->actionFunc(this, play);
     }
+}
+
+static u8 ObjOshihiki_GetCoopPhase(const ObjOshihiki* this) {
+    if (this->stateFlags & (PUSHBLOCK_SETUP_PUSH | PUSHBLOCK_PUSH)) {
+        return HYRULE_COOP_PUSH_BLOCK_PUSHING;
+    }
+    if (this->stateFlags & (PUSHBLOCK_SETUP_FALL | PUSHBLOCK_FALL)) {
+        return HYRULE_COOP_PUSH_BLOCK_FALLING;
+    }
+    if (this->stateFlags & (PUSHBLOCK_SETUP_ON_ACTOR | PUSHBLOCK_ON_ACTOR)) {
+        return HYRULE_COOP_PUSH_BLOCK_ON_ACTOR;
+    }
+    return HYRULE_COOP_PUSH_BLOCK_ON_SCENE;
+}
+
+int HyruleCoop_ObjOshihikiCaptureState(const void* actorRef, HyruleCoopPushBlockState* state) {
+    const ObjOshihiki* this = (const ObjOshihiki*)actorRef;
+    if (this == NULL || state == NULL) {
+        return 0;
+    }
+
+    state->homePosition[0] = this->dyna.actor.home.pos.x;
+    state->homePosition[1] = this->dyna.actor.home.pos.y;
+    state->homePosition[2] = this->dyna.actor.home.pos.z;
+    state->position[0] = this->dyna.actor.world.pos.x;
+    state->position[1] = this->dyna.actor.world.pos.y;
+    state->position[2] = this->dyna.actor.world.pos.z;
+    state->velocity[0] = this->dyna.actor.velocity.x;
+    state->velocity[1] = this->dyna.actor.velocity.y;
+    state->velocity[2] = this->dyna.actor.velocity.z;
+    state->pushSpeed = this->pushSpeed;
+    state->pushDistance = this->pushDist;
+    state->direction = this->direction;
+    state->timer = this->timer;
+    state->worldYaw = this->dyna.actor.world.rot.y;
+    state->phase = ObjOshihiki_GetCoopPhase(this);
+    return 1;
+}
+
+int HyruleCoop_ObjOshihikiApplyState(void* actorRef, void* playRef, const HyruleCoopPushBlockState* state) {
+    ObjOshihiki* this = (ObjOshihiki*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    if (this == NULL || play == NULL || state == NULL || state->phase > HYRULE_COOP_PUSH_BLOCK_FALLING) {
+        return 0;
+    }
+
+    if (ObjOshihiki_GetCoopPhase(this) != state->phase) {
+        switch (state->phase) {
+            case HYRULE_COOP_PUSH_BLOCK_ON_ACTOR:
+                ObjOshihiki_SetupOnActor(this, play);
+                break;
+            case HYRULE_COOP_PUSH_BLOCK_PUSHING:
+                ObjOshihiki_SetupPush(this, play);
+                break;
+            case HYRULE_COOP_PUSH_BLOCK_FALLING:
+                ObjOshihiki_SetupFall(this, play);
+                break;
+            case HYRULE_COOP_PUSH_BLOCK_ON_SCENE:
+            default:
+                ObjOshihiki_SetupOnScene(this, play);
+                break;
+        }
+    }
+
+    this->dyna.actor.home.pos.x = state->homePosition[0];
+    this->dyna.actor.home.pos.y = state->homePosition[1];
+    this->dyna.actor.home.pos.z = state->homePosition[2];
+    this->dyna.actor.world.pos.x = state->position[0];
+    this->dyna.actor.world.pos.y = state->position[1];
+    this->dyna.actor.world.pos.z = state->position[2];
+    this->dyna.actor.prevPos = this->dyna.actor.world.pos;
+    this->dyna.actor.velocity.x = state->velocity[0];
+    this->dyna.actor.velocity.y = state->velocity[1];
+    this->dyna.actor.velocity.z = state->velocity[2];
+    this->dyna.actor.world.rot.y = state->worldYaw;
+    this->dyna.actor.shape.rot.y = state->worldYaw;
+    this->dyna.unk_158 = state->worldYaw;
+    this->pushSpeed = state->pushSpeed;
+    this->pushDist = state->pushDistance;
+    this->direction = state->direction;
+    this->timer = state->timer;
+    return 1;
+}
+
+int HyruleCoop_ObjOshihikiPeekPush(const void* actorRef, float* direction) {
+    const ObjOshihiki* this = (const ObjOshihiki*)actorRef;
+    if (this == NULL || direction == NULL || ObjOshihiki_GetCoopPhase(this) != HYRULE_COOP_PUSH_BLOCK_PUSHING) {
+        return 0;
+    }
+    *direction = this->direction;
+    return 1;
+}
+
+int HyruleCoop_ObjOshihikiBeginPush(void* actorRef, void* playRef, float direction) {
+    ObjOshihiki* this = (ObjOshihiki*)actorRef;
+    PlayState* play = (PlayState*)playRef;
+    if (this == NULL || play == NULL || this->timer > 0 || fabsf(direction) < 0.001f ||
+        ObjOshihiki_GetCoopPhase(this) == HYRULE_COOP_PUSH_BLOCK_PUSHING || !ObjOshihiki_StrongEnough(this) ||
+        ObjOshihiki_CheckWall(play, this->dyna.unk_158, direction, this)) {
+        return 0;
+    }
+
+    this->direction = direction > 0.0f ? 1.0f : -1.0f;
+    this->dyna.unk_150 = this->direction;
+    ObjOshihiki_SetupPush(this, play);
+    return 1;
 }
 
 void ObjOshihiki_Draw(Actor* thisx, PlayState* play) {

@@ -7,4 +7,8 @@ void HyruleCoopRemotePlayer_Init(Actor* actor, PlayState* play);
 void HyruleCoopRemotePlayer_Update(Actor* actor, PlayState* play);
 void HyruleCoopRemotePlayer_Draw(Actor* actor, PlayState* play);
 void HyruleCoopRemotePlayer_Destroy(Actor* actor, PlayState* play);
+void HyruleCoopRemoteHorse_Init(Actor* actor, PlayState* play);
+void HyruleCoopRemoteHorse_Update(Actor* actor, PlayState* play);
+void HyruleCoopRemoteHorse_Draw(Actor* actor, PlayState* play);
+void HyruleCoopRemoteHorse_Destroy(Actor* actor, PlayState* play);
 }

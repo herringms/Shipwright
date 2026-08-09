@@ -8,6 +8,7 @@
 #include "objects/object_relay_objects/object_relay_objects.h"
 #include "soh/Enhancements/game-interactor/GameInteractor_Hooks.h"
 #include "soh/Enhancements/savestate_serialize.h"
+#include "soh/Network/HyruleCoop/DampeRaceBridge.h"
 
 #define FLAGS ACTOR_FLAG_UPDATE_CULLING_DISABLED
 
@@ -21,6 +22,11 @@ void BgRelayObjects_Destroy(Actor* thisx, PlayState* play);
 void BgRelayObjects_Update(Actor* thisx, PlayState* play);
 void BgRelayObjects_Draw(Actor* thisx, PlayState* play);
 void BgRelayObjects_Reset(void);
+
+static int BgRelayObjects_IsDampeRaceDoor(const BgRelayObjects* this);
+static u8 BgRelayObjects_GetCoopAction(const BgRelayObjects* this);
+static void BgRelayObjects_SetCoopAction(BgRelayObjects* this, u8 action);
+static void BgRelayObjects_ApplyCoopSwitch(PlayState* play, u8 switchFlag, u8 switchIsSet);
 
 void func_808A90F4(BgRelayObjects* this, PlayState* play);
 void func_808A91AC(BgRelayObjects* this, PlayState* play);
@@ -96,7 +102,9 @@ void BgRelayObjects_Init(Actor* thisx, PlayState* play) {
                 this->actionFunc = BgRelayObjects_DoNothing;
             }
         } else if (this->unk_169 != 5) {
-            Flags_UnsetSwitch(play, this->switchFlag);
+            if (HyruleCoop_DampeRaceIsLocalAuthority()) {
+                Flags_UnsetSwitch(play, this->switchFlag);
+            }
             if (D_808A9508 & (1 << this->unk_169)) {
                 Actor_Kill(thisx);
             } else {
@@ -104,7 +112,9 @@ void BgRelayObjects_Init(Actor* thisx, PlayState* play) {
                 this->actionFunc = func_808A90F4;
             }
         } else {
-            Flags_SetSwitch(play, this->switchFlag);
+            if (HyruleCoop_DampeRaceIsLocalAuthority()) {
+                Flags_SetSwitch(play, this->switchFlag);
+            }
             this->actionFunc = func_808A91AC;
             thisx->world.pos.y += 120.0f;
             D_808A9508 |= 1;
@@ -204,7 +214,108 @@ void func_808A939C(BgRelayObjects* this, PlayState* play) {
 void BgRelayObjects_Update(Actor* thisx, PlayState* play) {
     BgRelayObjects* this = (BgRelayObjects*)thisx;
 
+    if (BgRelayObjects_IsDampeRaceDoor(this) && !HyruleCoop_DampeRaceIsLocalAuthority()) {
+        return;
+    }
     this->actionFunc(this, play);
+}
+
+static int BgRelayObjects_IsDampeRaceDoor(const BgRelayObjects* this) {
+    return this != NULL && this->dyna.actor.id == ACTOR_BG_RELAY_OBJECTS &&
+           this->dyna.actor.params == WINDMILL_DAMPE_STONE_DOOR;
+}
+
+static u8 BgRelayObjects_GetCoopAction(const BgRelayObjects* this) {
+    if (this->actionFunc == func_808A90F4) {
+        return HYRULE_COOP_DAMPE_DOOR_OPENING;
+    }
+    if (this->actionFunc == func_808A91AC) {
+        return HYRULE_COOP_DAMPE_DOOR_OPEN;
+    }
+    if (this->actionFunc == func_808A9234) {
+        return HYRULE_COOP_DAMPE_DOOR_CLOSING;
+    }
+    if (this->actionFunc == func_808A932C) {
+        return HYRULE_COOP_DAMPE_DOOR_RESPAWN;
+    }
+    return HYRULE_COOP_DAMPE_DOOR_CLOSED;
+}
+
+static void BgRelayObjects_SetCoopAction(BgRelayObjects* this, u8 action) {
+    switch (action) {
+        case HYRULE_COOP_DAMPE_DOOR_OPENING:
+            this->actionFunc = func_808A90F4;
+            break;
+        case HYRULE_COOP_DAMPE_DOOR_OPEN:
+            this->actionFunc = func_808A91AC;
+            break;
+        case HYRULE_COOP_DAMPE_DOOR_CLOSING:
+            this->actionFunc = func_808A9234;
+            break;
+        case HYRULE_COOP_DAMPE_DOOR_RESPAWN:
+            this->actionFunc = func_808A932C;
+            break;
+        default:
+            this->actionFunc = BgRelayObjects_DoNothing;
+            break;
+    }
+}
+
+static void BgRelayObjects_ApplyCoopSwitch(PlayState* play, u8 switchFlag, u8 switchIsSet) {
+    u32 mask = 1U << (switchFlag & 0x1F);
+
+    /* Remote snapshots must not fire local scene-flag hooks or create a new intent. */
+    if (switchFlag < 0x20) {
+        if (switchIsSet) {
+            play->actorCtx.flags.swch |= mask;
+        } else {
+            play->actorCtx.flags.swch &= ~mask;
+        }
+    } else if (switchIsSet) {
+        play->actorCtx.flags.tempSwch |= mask;
+    } else {
+        play->actorCtx.flags.tempSwch &= ~mask;
+    }
+}
+
+int HyruleCoop_DampeRaceCaptureDoorState(const void* actorRef, HyruleCoopDampeRaceDoorState* state) {
+    const BgRelayObjects* this = actorRef;
+
+    if (!BgRelayObjects_IsDampeRaceDoor(this) || state == NULL) {
+        return 0;
+    }
+    state->action = BgRelayObjects_GetCoopAction(this);
+    state->switchFlag = this->switchFlag;
+    state->room = this->unk_169;
+    state->switchIsSet = Flags_GetSwitch(gPlayState, this->switchFlag) != 0;
+    state->timer = this->timer;
+    state->worldRotY = this->dyna.actor.world.rot.y;
+    state->worldPosX = this->dyna.actor.world.pos.x;
+    state->worldPosY = this->dyna.actor.world.pos.y;
+    state->worldPosZ = this->dyna.actor.world.pos.z;
+    state->velocityY = this->dyna.actor.velocity.y;
+    return 1;
+}
+
+int HyruleCoop_DampeRaceApplyDoorState(void* actorRef, void* playRef, const HyruleCoopDampeRaceDoorState* state) {
+    BgRelayObjects* this = actorRef;
+    PlayState* play = playRef;
+
+    if (!BgRelayObjects_IsDampeRaceDoor(this) || play == NULL || state == NULL || state->switchFlag >= 0x40 ||
+        state->action >= HYRULE_COOP_DAMPE_DOOR_ACTION_COUNT) {
+        return 0;
+    }
+    this->switchFlag = state->switchFlag;
+    this->unk_169 = state->room;
+    this->timer = state->timer;
+    this->dyna.actor.world.rot.y = state->worldRotY;
+    this->dyna.actor.world.pos.x = state->worldPosX;
+    this->dyna.actor.world.pos.y = state->worldPosY;
+    this->dyna.actor.world.pos.z = state->worldPosZ;
+    this->dyna.actor.velocity.y = state->velocityY;
+    BgRelayObjects_ApplyCoopSwitch(play, state->switchFlag, state->switchIsSet);
+    BgRelayObjects_SetCoopAction(this, state->action);
+    return 1;
 }
 
 void BgRelayObjects_Draw(Actor* thisx, PlayState* play) {
