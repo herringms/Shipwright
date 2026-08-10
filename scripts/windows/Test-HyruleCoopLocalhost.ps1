@@ -134,7 +134,24 @@ try {
     $env:HYRULE_COOP_TEST_REQUIRE_DRAW = if ($RenderRole -eq "Host") { "1" } else { "0" }
     $hostProcess = Start-Process -FilePath $hostExe -WorkingDirectory $hostDir -WindowStyle Normal -PassThru
 
-    Start-Sleep -Seconds 2
+    $hostReadyDeadline = (Get-Date).AddSeconds(20)
+    $hostReady = $false
+    while ((Get-Date) -lt $hostReadyDeadline) {
+        Start-Sleep -Milliseconds 200
+        $hostText = Read-SharedText $hostReport
+        if ($hostText -match "`thost`tconfigured`t") {
+            $hostReady = $true
+            break
+        }
+        $hostProcess.Refresh()
+        if ($hostProcess.HasExited) {
+            break
+        }
+    }
+    if (-not $hostReady) {
+        throw "Hyrule Co-op localhost host did not become ready before the client launch."
+    }
+
     $env:HYRULE_COOP_TEST_REPORT = $clientReport
     $env:HYRULE_COOP_TEST_ROLE = "client"
     $env:HYRULE_COOP_SAVE_DIR = (Join-Path $clientDir "Save")
