@@ -402,6 +402,7 @@ $guestData = $savedGuest.sections.base.data
 # the guest to the opposite Link age. They are unrelated to co-op campaign state.
 $guestSave.sections.base.data.entranceIndex = $guestData.entranceIndex
 $guestSave.sections.base.data.magicLevel = $guestData.magicLevel
+$guestSave.sections.base.data.maskMemory = $guestData.maskMemory
 $guestSave.sections.base.data.equips.buttonItems[0] = $guestData.equips.buttonItems[0]
 $guestSave.sections.base.data.equips.equipment = $guestData.equips.equipment
 $guestSave.sections.base.data.inventory.equipment = $guestData.inventory.equipment

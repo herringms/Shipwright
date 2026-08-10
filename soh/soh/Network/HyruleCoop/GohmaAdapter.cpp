@@ -224,6 +224,21 @@ bool ApplyGohmaSnapshot(void* actorRef, const ActorSnapshotMessage& message) {
     return true;
 }
 
+bool StartGohmaDefeatPresentation(void* actorRef, void* playStateRef, const ActorSnapshotMessage& message) {
+    BossGoma* actor = static_cast<BossGoma*>(actorRef);
+    PlayState* play = static_cast<PlayState*>(playStateRef);
+    if (actor == nullptr || play == nullptr || message.health > 0 || message.stateId != 2 ||
+        !ApplyGohmaSnapshot(actor, message)) {
+        return false;
+    }
+
+    // A delayed snapshot may contain an already-advanced host cutscene state. Each peer must initialize its own
+    // camera, animation, and timers from the beginning while retaining the authoritative terminal transform.
+    BossGoma_SetupDefeated(actor, play);
+    actor->actor.colChkInfo.health = 0;
+    return true;
+}
+
 bool ConsumeGohmaHit(void* actorRef) {
     BossGoma* actor = static_cast<BossGoma*>(actorRef);
     if ((actor->collider.elements[0].info.bumperFlags & BUMP_HIT) == 0) {
